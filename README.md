@@ -60,7 +60,7 @@ Because this is an unpacked extension, it does not update automatically. After d
 
 YouTube Digest needs two keys under your own provider accounts:
 
-1. A **Supadata API key** to retrieve YouTube transcripts.
+1. A **Supadata API key** for YouTube and X transcripts. Bilibili reads its own subtitle tracks.
 2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
 
 ### Get a Supadata API key
@@ -110,7 +110,9 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
-- Native subtitle tracks returned by Supadata. YouTube Digest prefers English when available, but may show another native language.
+- YouTube native captions through Supadata, with English preferred when available.
+- Public X video posts through Supadata. Select **获取字幕** after reviewing credit usage. Timestamp links for X work in Chrome with this extension.
+- Bilibili BV video pages and individual parts read their subtitle tracks directly. Some tracks require signing in to Bilibili. Videos without a subtitle track cannot be transcribed by this integration.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - AI overviews, selected-text explanations, translation, and automatic note polishing.
 - Local notes and a local cache for recent transcript and digest results.
@@ -118,7 +120,7 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
-YouTube Digest forces Supadata's `mode=native`. It does not request AI-generated transcripts or perform local audio transcription when native captions are unavailable.
+YouTube uses Supadata's `mode=native`. X uses `mode=auto` after you select **获取字幕**, allowing audio transcription when existing captions are unavailable. Bilibili retrieves captions from Bilibili directly.
 
 ## Supadata free tier and request costs
 
@@ -127,10 +129,10 @@ Current as of August 9, 2026, the [Supadata pricing page](https://supadata.ai/pr
 The [Supadata transcript documentation](https://docs.supadata.ai/get-transcript) describes the transcript request modes and credit behavior:
 
 - A native transcript request uses **1 credit**, regardless of video duration.
-- A generated transcript costs **2 credits per video minute**. YouTube Digest does not use this path because it forces `mode=native`.
+- A generated transcript costs **2 credits per video minute**. Only X can use this path when Supadata needs to generate captions.
 - An unavailable native lookup returned as HTTP `206` still uses **1 credit**.
 
-With the current native-only behavior, the free tier can cover roughly 100 transcript lookups per month when each request succeeds once. Retries and unavailable-caption lookups also consume credits, so actual successful-video coverage can be lower.
+For native captions, the free tier can cover roughly 100 transcript lookups per month when each request succeeds once. Retries, unavailable-caption lookups and speech transcription also consume credits.
 
 DeepSeek usage is separate from Supadata. YouTube Digest does not collect payments or resell access. Set spending limits and monitor both accounts.
 
@@ -175,7 +177,7 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 
 YouTube Digest makes provider requests directly from the extension:
 
-1. It sends a canonical YouTube watch URL to Supadata to request the native transcript.
+1. It sends a canonical YouTube watch URL or X post URL to Supadata. The Bilibili integration fetches subtitles directly from Bilibili and its subtitle CDN.
 2. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
 3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 4. It stores keys, settings, notes, and recent cache entries locally in Chrome.
@@ -236,4 +238,4 @@ The agent should also reload the unpacked extension in Chrome and test several r
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Bilibili subtitle retrieval is adapted from [Digest for Bilibili](https://github.com/biuworks/bilibili-digest) under its [MIT license](lib/bilibili-digest-LICENSE).

@@ -3,7 +3,7 @@
  *
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
- * 2. Fetching YouTube transcripts via Supadata API
+ * 2. Fetching subtitles from Supadata and Bilibili
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -14,6 +14,8 @@
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
+importScripts("lib/wbi.js");
+importScripts("lib/bili-api.js");
 
 const DEBUG = false;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -234,7 +236,7 @@ async function readBoundedAiResponse(response, onActivity) {
  * Chrome's Side Panel API lets us show a persistent panel alongside the page.
  */
 chrome.action.onClicked.addListener((tab) => {
-  if (!(tab.url || "").startsWith("https://www.youtube.com")) {
+  if (!YTD_SETTINGS.supportsPanel(tab.url)) {
     void updatePanelForTab(tab.id, tab.url, tab.windowId);
     return;
   }
@@ -249,7 +251,7 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 /**
- * Allow the side panel to open on any page, but it's designed for YouTube.
+ * Register the toolbar entry point for supported video pages.
  */
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
@@ -258,11 +260,11 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 });
 
 /**
- * Keep the side panel scoped to YouTube tabs only.
+ * Keep the side panel scoped to supported tabs.
  *
  * Chrome side panels are "global" by default: once opened, the panel follows
- * you to every tab. To make YouTube Digest behave like a YouTube-only tool, we
- * enable the panel on YouTube tabs and disable it everywhere else. Disabling
+ * you to every tab. Enable the panel on supported tabs and disable it
+ * everywhere else. Disabling
  * on a tab makes Chrome hide/close the panel for that tab, so it never lingers
  * on a new tab or some other website.
  *
@@ -292,8 +294,7 @@ async function closePanelForTab(tabId, windowId) {
 }
 
 async function updatePanelForTab(tabId, url, windowId) {
-  const isYouTube = (url || "").startsWith("https://www.youtube.com");
-  if (!isYouTube) {
+  if (!YTD_SETTINGS.supportsPanel(url)) {
     // Close the visible instance first. Then disable this tab so Chrome cannot
     // reopen the global default panel as navigation settles.
     await closePanelForTab(tabId, windowId);
@@ -350,7 +351,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(message.videoId)
+    handleFetchTranscript(message.videoId, { allowXTranscription: message.allowXTranscription === true })
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
@@ -459,7 +460,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // IMPORTANT: we call setOptions + open synchronously (no await between them)
     // to preserve the user gesture context. Chrome requires sidePanel.open()
     // to be called within a user gesture — awaiting anything first can expire it.
-    if (tabId) {
+    if (tabId && YTD_SETTINGS.videoFromUrl(sender.tab.url)) {
       chrome.sidePanel.setOptions({
         tabId,
         path: "sidepanel.html",
@@ -471,31 +472,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // Broadcast to side panel to start digest (in case it's already open)
           setTimeout(() => {
             chrome.runtime
-              .sendMessage({ action: "startDigestFromButton" })
+              .sendMessage({ action: "startDigestFromButton", tabId })
               .catch(() => {});
           }, 300);
         })
         .catch((err) => {
           console.error("[YouTube Digest BG] openSidePanel error:", err);
-        });
-    } else {
-      // Fallback: find the active tab
-      chrome.tabs
-        .query({ active: true, lastFocusedWindow: true })
-        .then((tabs) => {
-          if (tabs[0]) {
-            chrome.sidePanel.setOptions({
-              tabId: tabs[0].id,
-              path: "sidepanel.html",
-              enabled: true,
-            });
-            chrome.sidePanel.open({ tabId: tabs[0].id }).catch((err) => {
-              console.error(
-                "[YouTube Digest BG] openSidePanel fallback error:",
-                err,
-              );
-            });
-          }
         });
     }
 
@@ -508,73 +490,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     debugLog("[YouTube Digest BG] Relay request:", message.payload?.action);
     (async () => {
       try {
-        // Query specifically for YouTube tabs to avoid side panel context issues
-        // Try multiple query strategies to find the right tab
-        let tabs = await chrome.tabs.query({
-          active: true,
-          lastFocusedWindow: true,
+        const tab = await chrome.tabs.get(message.tabId);
+        const source = YTD_SETTINGS.videoFromUrl(tab.url);
+        if (!source || source.id !== message.videoId) {
+          sendResponse({ success: false, error: "视频页面已切换。" });
+          return;
+        }
+
+        const response = await chrome.tabs.sendMessage(tab.id, {
+          ...message.payload,
+          videoId: source.id,
         });
-        debugLog(
-          "[YouTube Digest BG] Active tab in last focused window:",
-          tabs.length,
-          tabs[0]?.url,
-        );
-
-        // If no YouTube tab found, try broader query
-        if (!tabs[0] || !tabs[0].url?.includes("youtube.com")) {
-          tabs = await chrome.tabs.query({
-            url: "https://www.youtube.com/*",
-            active: true,
-          });
-          debugLog("[YouTube Digest BG] Active YouTube tabs:", tabs.length);
-        }
-
-        // Still nothing? Try any YouTube tab
-        if (!tabs[0]) {
-          tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
-          debugLog("[YouTube Digest BG] Any YouTube tabs:", tabs.length);
-        }
-
-        if (tabs[0]) {
-          debugLog(
-            "[YouTube Digest BG] Sending to tab:",
-            tabs[0].id,
-            "URL:",
-            tabs[0].url,
-          );
-          let response = await chrome.tabs.sendMessage(
-            tabs[0].id,
-            message.payload,
-          );
-
-          // For getVideoInfo, PREFER YouTube's own player data over the
-          // DOM scrape. The player's videoDetails is canonical: its `author`
-          // is always THIS video's channel and its `shortDescription` is the
-          // full text. The DOM scrape is unreliable — e.g. on a playlist page
-          // it grabbed the playlist owner's name ("Zara Zhang") instead of the
-          // real channel ("Replit and Stripe"), and its description is
-          // truncated while the box is collapsed. We fall back to the DOM
-          // only for fields the player didn't provide.
-          if (message.payload?.action === "getVideoInfo") {
-            const playerInfo = await getPlayerVideoDetails(tabs[0].id);
-            if (playerInfo) {
-              response = {
+        if (message.payload.action === "getVideoInfo" && source.platform === "youtube") {
+          // Prefer the player's metadata to the playlist or collapsed DOM text.
+          const playerInfo = await getPlayerVideoDetails(tab.id);
+          if (playerInfo) {
+            sendResponse({
+              success: true,
+              response: {
                 title: playerInfo.title || response?.title || "",
-                channelName:
-                  playerInfo.channelName || response?.channelName || "",
+                channelName: playerInfo.channelName || response?.channelName || "",
                 duration: playerInfo.duration || response?.duration || 0,
-                description:
-                  playerInfo.description || response?.description || "",
-              };
-            }
+                description: playerInfo.description || response?.description || "",
+              },
+            });
+            return;
           }
-
-          debugLog("[YouTube Digest BG] Got response from content:", response);
-          sendResponse({ success: true, response });
-        } else {
-          debugLog("[YouTube Digest BG] No YouTube tab found");
-          sendResponse({ success: false, error: "No YouTube tab found" });
         }
+        sendResponse({ success: true, response });
       } catch (err) {
         console.error("[YouTube Digest BG] Relay error:", err.message);
         sendResponse({ success: false, error: err.message });
@@ -639,7 +582,70 @@ async function getPlayerVideoDetails(tabId) {
  * @param {string} videoId - The YouTube video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function handleFetchTranscript(videoId) {
+const transcriptRequests = new Map();
+
+async function handleFetchTranscript(videoId, { allowXTranscription = false } = {}) {
+  const source = YTD_SETTINGS.videoFromId(videoId);
+  if (!source) return { success: false, error: "无法识别视频地址。" };
+  if (source.platform === "x" && !allowXTranscription) {
+    return { success: false, error: "请先在摘要侧边栏获取此视频的字幕。" };
+  }
+
+  if (!transcriptRequests.has(videoId)) {
+    const request = (source.platform === "bilibili"
+      ? fetchBilibiliTranscript(source)
+      : fetchSupadataTranscript(source)
+    ).finally(() => transcriptRequests.delete(videoId));
+    transcriptRequests.set(videoId, request);
+  }
+  return transcriptRequests.get(videoId);
+}
+
+async function fetchBilibiliTranscript(source) {
+  try {
+    const info = await BILI_API.fetchVideoInfo(source.bvid, { page: source.page });
+    if (source.page > info.pageCount) {
+      return { success: false, error: "此视频没有这个分 P。" };
+    }
+    const { tracks, needLogin } = await BILI_API.fetchSubtitleTracks(info);
+    const preferred = BILI_API.pickSubtitleTrack(tracks, undefined, info);
+    if (!preferred) {
+      return {
+        success: false,
+        error: needLogin ? "NEED_LOGIN" : "NO_TRANSCRIPT",
+        message: needLogin
+          ? "请在当前浏览器登录哔哩哔哩，再重试获取此视频的字幕。"
+          : "这个视频没有可读取的字幕轨。",
+      };
+    }
+
+    const ordered = [preferred, ...tracks.filter((track) => track !== preferred)];
+    let lastError;
+    for (const track of ordered) {
+      try {
+        const entries = await BILI_API.fetchSubtitleTrackContent(track.url);
+        if (!entries.length) continue;
+        const language = track.lang.replace(/^ai[-_]/i, "") || null;
+        return {
+          ...buildTranscript(entries, language, "哔哩哔哩返回了空字幕。"),
+          videoInfo: {
+            title: info.title,
+            channelName: info.owner,
+            description: info.description,
+            duration: info.duration,
+          },
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    return { success: false, error: lastError?.message || "哔哩哔哩返回了空字幕。" };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function fetchSupadataTranscript(source) {
   try {
     const settings = await getSettings();
     if (!settings.supadataApiKey) {
@@ -650,16 +656,14 @@ async function handleFetchTranscript(videoId) {
       };
     }
 
-    // Share only the canonical watch URL. This strips playlist, referral,
-    // timestamp, and other browsing parameters from the active tab URL.
-    const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
+    // Only send the canonical video address, with no browsing parameters.
     // Using the universal transcript endpoint with text=false to get timestamped chunks
     const apiUrl = new URL("https://api.supadata.ai/v1/transcript");
-    apiUrl.searchParams.set("url", canonicalVideoUrl);
+    apiUrl.searchParams.set("url", source.url);
     apiUrl.searchParams.set("text", "false"); // Get timestamped chunks, not plain text
-    apiUrl.searchParams.set("lang", "en"); // Prefer English
-    // Caption-only product scope: never fall back to paid AI transcription.
-    apiUrl.searchParams.set("mode", "native");
+    if (source.platform === "youtube") apiUrl.searchParams.set("lang", "en");
+    // X-only fallback is disclosed on the panel before an uncached request.
+    apiUrl.searchParams.set("mode", source.platform === "x" ? "auto" : "native");
 
     // Make the API request
     const response = await fetch(apiUrl.toString(), {
@@ -680,7 +684,9 @@ async function handleFetchTranscript(videoId) {
       return {
         success: false,
         error: "NO_TRANSCRIPT",
-        message: "No native subtitle track is available for this video.",
+        message: source.platform === "x"
+          ? "Supadata 未能为这条 X 视频返回字幕。"
+          : "No native subtitle track is available for this video.",
       };
     }
 
@@ -715,58 +721,7 @@ async function handleFetchTranscript(videoId) {
 
     const data = await response.json();
 
-    // Parse the response into our internal format
-    // Supadata returns: { content: [{ text, offset, duration, lang }], lang, availableLangs }
-    const transcript = [];
-    let transcriptTextPlain = ""; // Plain text for display/export
-    let transcriptTextTimestamped = ""; // Timestamped text for AI analysis
-
-    if (data.content && Array.isArray(data.content)) {
-      for (const chunk of data.content) {
-        if (chunk.text) {
-          // Clean up caption artifacts:
-          // ">>" = speaker change marker from YouTube auto-captions
-          const cleanText = chunk.text.replace(/>> ?/g, "").trim();
-          if (!cleanText) continue; // Skip if nothing left after cleanup
-
-          // offset is in milliseconds, convert to seconds
-          const startSeconds = Math.floor((chunk.offset || 0) / 1000);
-          const minutes = Math.floor(startSeconds / 60);
-          const seconds = startSeconds % 60;
-          const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
-          transcript.push({
-            text: cleanText,
-            start: startSeconds,
-            duration: Math.floor((chunk.duration || 0) / 1000),
-            language: chunk.lang || data.lang || null,
-          });
-
-          // Plain text without timestamps (for display/export)
-          transcriptTextPlain += cleanText + " ";
-
-          // Timestamped text for DeepSeek (format: [MM:SS] text)
-          // This allows the model to reference actual transcript positions.
-          transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
-        }
-      }
-    }
-
-    if (transcript.length === 0) {
-      return {
-        success: false,
-        error: "EMPTY_TRANSCRIPT",
-        message: "Supadata returned an empty transcript for this video.",
-      };
-    }
-
-    return {
-      success: true,
-      transcript: transcript,
-      transcriptText: transcriptTextPlain.trim(), // For display
-      transcriptTextTimestamped: transcriptTextTimestamped.trim(), // For AI
-      language: typeof data.lang === "string" ? data.lang : null,
-    };
+    return parseSupadataTranscript(data);
   } catch (error) {
     console.error("Transcript fetch error:", error);
     return {
@@ -774,6 +729,37 @@ async function handleFetchTranscript(videoId) {
       error: error.message || "Failed to fetch transcript",
     };
   }
+}
+
+function parseSupadataTranscript(data) {
+  const chunks = Array.isArray(data.content) ? data.content : [];
+  const language = typeof data.lang === "string" ? data.lang : null;
+  const entries = chunks.flatMap((chunk) => {
+    const text = typeof chunk?.text === "string" ? chunk.text.replace(/>> ?/g, "").trim() : "";
+    if (!text) return [];
+    return [{
+      text,
+      start: Math.max(0, Math.floor((Number(chunk.offset) || 0) / 1000)),
+      duration: Math.max(0, Math.floor((Number(chunk.duration) || 0) / 1000)),
+      language: chunk.lang || language,
+    }];
+  });
+  return buildTranscript(entries, language, "Supadata returned an empty transcript for this video.");
+}
+
+function buildTranscript(entries, language, emptyMessage) {
+  if (!entries.length) return { success: false, error: "EMPTY_TRANSCRIPT", message: emptyMessage };
+  return {
+    success: true,
+    transcript: entries,
+    transcriptText: entries.map(({ text }) => text).join(" "),
+    transcriptTextTimestamped: entries.map(({ start, text }) => {
+      const seconds = Math.floor(start);
+      const timestamp = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+      return `[${timestamp}] ${text}`;
+    }).join("\n"),
+    language,
+  };
 }
 
 /**
@@ -805,42 +791,7 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
     const data = await response.json();
 
     if (data.status === "completed") {
-      // Parse the completed transcript
-      const transcript = [];
-      let transcriptTextPlain = "";
-      let transcriptTextTimestamped = "";
-
-      if (data.content && Array.isArray(data.content)) {
-        for (const chunk of data.content) {
-          if (chunk.text) {
-            // Clean up caption artifacts (">>" = speaker change marker)
-            const cleanText = chunk.text.replace(/>> ?/g, "").trim();
-            if (!cleanText) continue;
-
-            const startSeconds = Math.floor((chunk.offset || 0) / 1000);
-            const minutes = Math.floor(startSeconds / 60);
-            const seconds = startSeconds % 60;
-            const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
-            transcript.push({
-              text: cleanText,
-              start: startSeconds,
-              duration: Math.floor((chunk.duration || 0) / 1000),
-              language: chunk.lang || data.lang || null,
-            });
-            transcriptTextPlain += cleanText + " ";
-            transcriptTextTimestamped += `[${timestamp}] ${chunk.text}\n`;
-          }
-        }
-      }
-
-      return {
-        success: true,
-        transcript: transcript,
-        transcriptText: transcriptTextPlain.trim(),
-        transcriptTextTimestamped: transcriptTextTimestamped.trim(),
-        language: typeof data.lang === "string" ? data.lang : null,
-      };
+      return parseSupadataTranscript(data.result || data);
     }
 
     if (data.status === "failed") {
@@ -1141,7 +1092,8 @@ async function handleSaveNote(
   selectedText,
 ) {
   try {
-    const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
+    const source = YTD_SETTINGS.videoFromId(videoId);
+    if (!source) return { success: false, error: "无法识别视频地址。" };
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
     const exactSelectedText =
       typeof selectedText === "string"
@@ -1164,7 +1116,7 @@ async function handleSaveNote(
           typeof channelName === "string" ? channelName.slice(0, 300) : "",
         timestamp: `${minutes}:${String(seconds).padStart(2, "0")}`,
         timestampSeconds: safeTimestamp,
-        timestampedUrl: `${canonicalVideoUrl}&t=${safeTimestamp}s`,
+        timestampedUrl: YTD_SETTINGS.timestampUrl(source, safeTimestamp),
         text: exactSelectedText,
         rawText: exactSelectedText,
         createdAt: Date.now(),
@@ -1194,7 +1146,7 @@ async function handleSaveNote(
     if (!transcript) {
       const transcriptResult = await handleFetchTranscript(videoId);
       if (!transcriptResult.success) {
-        return { success: false, error: "Could not fetch transcript" };
+        return { success: false, error: transcriptResult.message || transcriptResult.error };
       }
       transcript = transcriptResult.transcript;
     }
@@ -1280,7 +1232,7 @@ async function handleSaveNote(
     const formattedTimestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
 
     // Create timestamped URL
-    const timestampedUrl = `${canonicalVideoUrl}&t=${safeTimestamp}s`;
+    const timestampedUrl = YTD_SETTINGS.timestampUrl(source, safeTimestamp);
 
     // Create the note object
     const note = {
@@ -1716,6 +1668,7 @@ async function callAiTranslation(
 
 // Pure validators are exposed for the repository's Node tests only.
 globalThis.__YTD_TRANSLATION_TESTING__ = {
+  handleFetchTranscript,
   requestAiCompletion,
   callAiTranslation,
   validateTranscriptBatchRequest,

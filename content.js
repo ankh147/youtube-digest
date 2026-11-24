@@ -1,17 +1,4 @@
-/**
- * CONTENT SCRIPT
- *
- * This script runs ON the YouTube page itself. It can see and modify
- * the YouTube page DOM (the HTML elements).
- *
- * It handles:
- * 1. Extracting video info (title, channel name) from the page
- * 2. Injecting "key moment" markers onto YouTube's progress bar
- * 3. Adding a "Digest" button to YouTube's action bar (next to Share/Save)
- *
- * Think of it like a robot sitting inside the YouTube tab,
- * reading the page and making small visual changes.
- */
+// Site integration for the shared sidebar, player controls and note button.
 
 const DEBUG = false;
 const debugLog = (...args) => {
@@ -30,6 +17,71 @@ let ytdDigestButton = null;
 let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
 let digestButtonResizeListenerAdded = false;
+
+function currentSource() {
+  return YTD_SETTINGS.videoFromUrl(window.location.href);
+}
+
+function findPostArticle(source) {
+  return Array.from(document.querySelectorAll('main article[data-testid="tweet"]')).find(
+    (article) => Array.from(article.querySelectorAll('a[href*="/status/"]')).some(
+      (link) => YTD_SETTINGS.videoFromUrl(link.href)?.id === source.id,
+    ),
+  );
+}
+
+function findPostPlayer(article) {
+  return article?.querySelector('[data-testid="videoPlayer"], [data-testid="videoComponent"]') || null;
+}
+
+function findVideo(source = currentSource()) {
+  if (!source) return null;
+  if (source.platform === "youtube") return document.querySelector("video.html5-main-video");
+  if (source.platform === "bilibili") {
+    return document.querySelector("#bilibili-player video, .bpx-player-video-wrap video");
+  }
+  const article = findPostArticle(source);
+  if (!article) return null;
+  return article.querySelector("video");
+}
+
+function playerContainerFor(source) {
+  if (source?.platform === "youtube") {
+    return document.querySelector("#movie_player.html5-video-player, #movie_player, .html5-video-player");
+  }
+  if (source?.platform === "bilibili") {
+    return document.querySelector("#bilibili-player .bpx-player-primary-area") ||
+      document.querySelector("#bilibili-player, .bpx-player-container");
+  }
+  const video = findVideo(source);
+  return video?.closest('[data-testid="videoPlayer"]') || video?.parentElement || null;
+}
+
+function actionHostFor(source) {
+  if (source.platform === "youtube") return findDigestButtonHost();
+  if (source.platform === "bilibili") {
+    return document.querySelector(".video-toolbar-left, .video-toolbar-container .toolbar-left, #arc_toolbar_report .toolbar-left") || playerContainerFor(source)?.parentElement;
+  }
+  const article = findPostArticle(source);
+  if (!article?.querySelector("video") && !findPostPlayer(article)) return null;
+  return article?.querySelector('[role="group"]') || article;
+}
+
+let lastTimestampTarget;
+function openLinkedPostTimestamp(source) {
+  if (source?.platform !== "x") return;
+  const offset = /^#digest-t=(\d{1,8})$/.exec(window.location.hash);
+  const video = offset && findVideo(source);
+  if (!video) return;
+  const target = window.location.href;
+  if (lastTimestampTarget === target) return;
+  lastTimestampTarget = target;
+  const seek = () => {
+    if (window.location.href === target) seekToTimestamp(Number(offset[1]), false);
+  };
+  if (video.readyState >= 1) seek();
+  else video.addEventListener("loadedmetadata", seek, { once: true });
+}
 
 // ============================================================
 // INITIALIZATION
@@ -54,6 +106,7 @@ function init() {
   // (YouTube is an SPA, so elements appear/disappear as you navigate)
   setupButtonObserver();
   setupDigestButtonResizeListener();
+  window.addEventListener("hashchange", () => openLinkedPostTimestamp(currentSource()));
 }
 
 /**
@@ -62,7 +115,7 @@ function init() {
  * after navigation, so a single immediate attempt can miss it.
  */
 function tryInjectNoteButton() {
-  if (!window.location.pathname.includes("/watch")) return;
+  if (!currentSource()) return;
 
   // Clear any existing retry so we don't stack timers
   if (ytdNoteButtonRetryTimer) {
@@ -75,9 +128,7 @@ function tryInjectNoteButton() {
 
   function attempt() {
     attempts++;
-    const playerContainer = document.querySelector(
-      "#movie_player.html5-video-player, #movie_player, .html5-video-player",
-    );
+    const playerContainer = playerContainerFor(currentSource());
 
     if (playerContainer) {
       injectNoteButton();
@@ -122,7 +173,10 @@ if (document.readyState === "loading") {
  * When they send key moments, we highlight them on the progress bar.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  debugLog("[YouTube Digest Content] Received message:", message.action, message);
+  if (message.videoId && currentSource()?.id !== message.videoId) {
+    sendResponse({ success: false, error: "视频页面已切换。" });
+    return false;
+  }
 
   if (message.action === "getVideoInfo") {
     // Read video title and channel name from the page
@@ -140,9 +194,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "getCurrentTime") {
     // Return the current video playback time (used by auto-scroll)
-    const video = document.querySelector("video.html5-main-video");
+    const video = findVideo();
     sendResponse({
-      currentTime: video ? Math.floor(video.currentTime) : 0,
+      currentTime: video?.currentTime ?? 0,
       paused: video ? video.paused : true,
     });
     return false;
@@ -151,8 +205,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "seekTo") {
     // Jump the video to a specific timestamp
     debugLog("[YouTube Digest Content] Seeking to:", message.seconds);
-    seekToTimestamp(message.seconds);
-    sendResponse({ success: true });
+    sendResponse({ success: seekToTimestamp(message.seconds) });
     return false;
   }
 
@@ -231,8 +284,9 @@ function createDigestButton() {
   const digestButton = document.createElement("button");
   digestButton.id = "ytd-digest-button";
   digestButton.type = "button";
-  digestButton.setAttribute("aria-label", "Open YouTube Digest");
-  digestButton.innerHTML = `<span class="ytd-digest-label">Digest</span>`;
+  digestButton.lang = "zh-CN";
+  digestButton.setAttribute("aria-label", "打开 YouTube Digest 摘要");
+  digestButton.innerHTML = `<span class="ytd-digest-label">摘要</span>`;
 
   // Style the button — rounded pill in our terracotta accent, sized to sit
   // comfortably among YouTube's native action buttons.
@@ -303,15 +357,17 @@ function injectDigestButton() {
     document.querySelectorAll("#ytd-digest-button"),
   );
 
-  if (!window.location.pathname.includes("/watch")) {
+  const source = currentSource();
+  if (!source) {
     existingButtons.forEach((button) => button.remove());
     ytdDigestButton = null;
     return false;
   }
 
-  const actionsContainer = findDigestButtonHost();
+  openLinkedPostTimestamp(source);
+  const actionsContainer = actionHostFor(source);
   if (!actionsContainer) {
-    debugLog("[YouTube Digest Content] Visible actions container not found yet");
+    if (source.platform !== "youtube") existingButtons.forEach((button) => button.remove());
     return false;
   }
 
@@ -369,12 +425,11 @@ function setupButtonObserver() {
   if (digestButtonObserver) return;
 
   digestButtonObserver = new MutationObserver(() => {
-    // Check if we need to inject the buttons
-    if (window.location.pathname.includes("/watch")) {
-      scheduleDigestButtonReconciliation();
-      if (!ytdNoteButton || !ytdNoteButton.isConnected) {
-        tryInjectNoteButton();
-      }
+    const source = currentSource();
+    if (!source && !ytdDigestButton?.isConnected) return;
+    scheduleDigestButtonReconciliation();
+    if (source && !ytdNoteButton?.isConnected && !ytdNoteButtonRetryTimer) {
+      tryInjectNoteButton();
     }
   });
 
@@ -395,8 +450,8 @@ function setupButtonObserver() {
  * after the cursor stays still for more than 2 seconds or leaves the player.
  */
 function injectNoteButton() {
-  // Don't inject if we're not on a video page
-  if (!window.location.pathname.includes("/watch")) return;
+  const source = currentSource();
+  if (!source) return;
 
   // Don't inject if button already exists and is properly tracked.
   // If a stale button exists (e.g., from a previous content-script instance),
@@ -411,11 +466,7 @@ function injectNoteButton() {
 
   // Find the video player container. YouTube rebuilds this dynamically, so
   // we try the most common selectors.
-  const playerContainer = document.querySelector(
-    "#movie_player.html5-video-player, " +
-      "#movie_player, " +
-      ".html5-video-player",
-  );
+  const playerContainer = playerContainerFor(source);
 
   if (!playerContainer) {
     debugLog(
@@ -437,12 +488,13 @@ function injectNoteButton() {
   // Create the note button — a soft rounded pill that floats over the player
   const noteButton = document.createElement("button");
   noteButton.id = "ytd-note-button";
+  noteButton.lang = "zh-CN";
   noteButton.innerHTML = `
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="margin-right: 7px;">
       <path d="M12 20h9"></path>
       <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
     </svg>
-    <span>Note</span>
+    <span>笔记</span>
   `;
 
   // Soft rounded pill in the terracotta accent, with a gentle shadow.
@@ -540,7 +592,8 @@ function resetNoteButtonTimer() {
  * in an input field.
  */
 function handleNoteKeyboardShortcut(e) {
-  if (!window.location.pathname.includes("/watch")) return;
+  const source = currentSource();
+  if (!source || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key !== "n" && e.key !== "N") return;
 
   // Ignore if the user is typing in an input/textarea/contenteditable
@@ -553,6 +606,7 @@ function handleNoteKeyboardShortcut(e) {
   ) {
     return;
   }
+  if (source.platform !== "youtube" && !playerContainerFor(source)?.contains(active)) return;
 
   // Prevent YouTube's own "n" shortcut (e.g. next video in playlist)
   e.preventDefault();
@@ -570,7 +624,8 @@ function handleNoteKeyboardShortcut(e) {
 async function saveCurrentNote() {
   debugLog("[YouTube Digest] Saving note");
 
-  const video = document.querySelector("video.html5-main-video");
+  const source = currentSource();
+  const video = findVideo(source);
   if (!video) {
     console.error("[YouTube Digest] No video element found");
     return;
@@ -579,14 +634,14 @@ async function saveCurrentNote() {
   // Go back 3 seconds to capture what was just said (user reacts after hearing it)
   const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
   const videoInfo = extractVideoInfo();
-  const videoId = new URLSearchParams(window.location.search).get("v");
+  const videoId = source.id;
 
   const noteButton = ytdNoteButton;
   const originalContent = noteButton ? noteButton.innerHTML : "";
 
   if (noteButton) {
     noteButton.innerHTML =
-      '<span style="letter-spacing: 0.2px;">SAVING...</span>';
+      '<span style="letter-spacing: 0.2px;">正在保存…</span>';
     noteButton.style.pointerEvents = "none";
   }
 
@@ -602,21 +657,23 @@ async function saveCurrentNote() {
     if (result.success) {
       if (noteButton) {
         noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">SAVED</span>';
+          '<span style="letter-spacing: 0.2px;">已保存</span>';
         noteButton.style.background = "#7c8b6f";
       }
       showNoteSavedToast(result.note);
     } else {
       if (noteButton) {
-        noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">ERROR</span>';
+        noteButton.textContent = result.error === "请先在摘要侧边栏获取此视频的字幕。"
+          ? "请先获取字幕"
+          : "错误";
+        noteButton.title = result.error || "保存失败";
       }
       console.error("[YouTube Digest] Save note error:", result.error);
     }
   } catch (err) {
     if (noteButton) {
       noteButton.innerHTML =
-        '<span style="letter-spacing: 0.2px;">ERROR</span>';
+        '<span style="letter-spacing: 0.2px;">错误</span>';
     }
     console.error("[YouTube Digest] Save note exception:", err);
   }
@@ -624,6 +681,7 @@ async function saveCurrentNote() {
   setTimeout(() => {
     if (noteButton) {
       noteButton.innerHTML = originalContent;
+      noteButton.removeAttribute("title");
       noteButton.style.background = "#c8674f";
       noteButton.style.pointerEvents = "auto";
     }
@@ -641,11 +699,11 @@ function showNoteSavedToast(note) {
   const toast = document.createElement("div");
   toast.id = "ytd-note-toast";
   toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">Note saved</div>
+    <div lang="zh-CN" style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">笔记已保存</div>
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
     <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
     <div style="margin-top: 10px; font-size: 11px;">
-      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">Copy link</a>
+      <a lang="zh-CN" href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">复制链接</a>
     </div>
   `;
 
@@ -679,7 +737,7 @@ function showNoteSavedToast(note) {
     e.preventDefault();
     try {
       await navigator.clipboard.writeText(note.timestampedUrl);
-      e.target.textContent = "Copied";
+      e.target.textContent = "已复制";
     } catch (err) {
       console.error("Copy failed:", err);
     }
@@ -703,6 +761,29 @@ function showNoteSavedToast(note) {
  * These are just sitting in the HTML — we grab them from the DOM elements.
  */
 function extractVideoInfo() {
+  const source = currentSource();
+  const player = findVideo(source);
+  const duration = Number.isFinite(player?.duration) ? player.duration : 0;
+  if (source?.platform === "x") {
+    const article = findPostArticle(source);
+    const description = article?.querySelector('[data-testid="tweetText"]')?.textContent?.trim() || "";
+    return {
+      title: description.slice(0, 150) || document.title,
+      channelName: article?.querySelector('[data-testid="User-Name"]')?.innerText?.split("\n")[0] || "",
+      description,
+      duration,
+      hasVideo: Boolean(player || findPostPlayer(article)),
+    };
+  }
+  if (source?.platform === "bilibili") {
+    return {
+      title: document.querySelector("h1.video-title, .video-title")?.textContent?.trim() || document.title,
+      channelName: document.querySelector(".up-info-container .up-name, a.up-name")?.textContent?.trim() || "",
+      description: document.querySelector("#v_desc, .basic-desc-info")?.textContent?.trim() || "",
+      duration,
+    };
+  }
+
   // The video title is in an h1 element inside the #title container
   const titleElement = document.querySelector(
     "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
@@ -712,9 +793,6 @@ function extractVideoInfo() {
   const channelElement = document.querySelector(
     "#channel-name yt-formatted-string a, ytd-channel-name yt-formatted-string a",
   );
-
-  // Video duration from the video element
-  const videoElement = document.querySelector("video.html5-main-video");
 
   // Video description — YouTube has this in a few possible places
   const descriptionElement = document.querySelector(
@@ -727,7 +805,7 @@ function extractVideoInfo() {
   return {
     title: titleElement?.textContent?.trim() || "",
     channelName: channelElement?.textContent?.trim() || "",
-    duration: videoElement?.duration || 0,
+    duration,
     description: descriptionElement?.textContent?.trim() || "",
   };
 }
@@ -765,19 +843,12 @@ function highlightKeyMoments(moments, videoDuration) {
  * We simply set the video element's .currentTime property,
  * which is the standard HTML5 way to seek in a video.
  */
-function seekToTimestamp(seconds) {
-  const video = document.querySelector("video.html5-main-video");
-  if (!video) {
-    console.error("[YouTube Digest Content] No video element found for seek");
-    return;
-  }
-
-  debugLog("[YouTube Digest Content] Seeking to:", seconds);
-  video.currentTime = seconds;
-  // Also play the video if it's paused
-  if (video.paused) {
-    video.play().catch(() => {}); // Ignore autoplay errors
-  }
+function seekToTimestamp(seconds, play = true) {
+  const video = findVideo();
+  if (!video || !Number.isFinite(seconds) || seconds < 0) return false;
+  video.currentTime = Number.isFinite(video.duration) ? Math.min(seconds, video.duration) : seconds;
+  if (play && video.paused) video.play().catch(() => {});
+  return true;
 }
 
 function escapeHtmlForContent(text) {

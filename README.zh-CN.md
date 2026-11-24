@@ -101,18 +101,18 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 ## 使用 YouTube Digest
 
-1. 打开一个有字幕的普通 YouTube 视频页面。
-2. 点击 YouTube Digest 扩展图标，打开侧边栏。
-3. 阅读带时间戳的字幕，或选择 **Original**、**中文**、**双语**。
-4. 打开 **Overview**，查看 AI 生成的章节和重点引用。
-5. 选中字幕，获取 AI 内容讲解。
-6. 从播放器或重点引用中保存笔记，之后可以在 **Notes** 中查看。
+1. 打开 YouTube 或哔哩哔哩的视频播放页，或打开一条带视频的公开 X 帖子。
+2. 点击页面上的 **摘要** 或 Chrome 工具栏里的扩展图标，打开侧边栏。X 视频首次获取时，查看额度说明后点 **获取字幕**。
+3. 阅读、搜索并点击带时间戳的字幕跳转。也可选择 **原文**、**中文** 或 **双语**。
+4. 打开 **概览** 查看 AI 生成的章节和重点引用，或选中字幕获取讲解。
+5. 从播放器、所选字幕或重点引用中保存笔记，在 **笔记** 中查看。
 
 ## 当前支持范围
 
 - Chrome 116 或更高版本。
-- 标准的 `youtube.com/watch` 视频页面。
-- Supadata 能够返回的原生字幕。YouTube Digest 会优先请求英文字幕，也可能显示其他可用的原生语言。
+- YouTube 的 `youtube.com/watch` 播放页通过 Supadata 读取现有字幕，优先英文。
+- X（Twitter）的公开视频帖子通过 Supadata 取字幕，合适时从语音生成。时间戳笔记链接在装有扩展的 Chrome 中跳转。
+- 哔哩哔哩的 BV 视频播放页直接读取当前分 P 的字幕轨。部分字幕需要在当前浏览器登录 B 站。无字幕轨或仅有画面内字幕的视频无法读取。
 - 原文、简体中文和双语对照字幕。
 - AI 概览、选中文本讲解、翻译和自动润色笔记。
 - 本地笔记，以及最近字幕、概览和翻译的本地缓存。
@@ -120,7 +120,7 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-YouTube Digest 强制使用 Supadata 的 `mode=native`，不会在没有原生字幕时请求 AI 生成转录，也不会在本地转录音频。
+YouTube 使用 Supadata 的 `mode=native`。X 在用户点 **获取字幕** 后才使用 `mode=auto`，没有现成字幕时由 Supadata 从语音生成。哔哩哔哩取字幕不使用 Supadata。
 
 ## Supadata 免费额度和请求成本
 
@@ -129,10 +129,10 @@ YouTube Digest 强制使用 Supadata 的 `mode=native`，不会在没有原生�
 [Supadata 字幕接口文档](https://docs.supadata.ai/get-transcript)说明了不同模式的计费方式：
 
 - 获取一次原生字幕消耗 **1 credit**，与视频时长无关。
-- AI 生成字幕每分钟消耗 **2 credits**。YouTube Digest 不会使用这条路径，因为它强制使用 `mode=native`。
+- AI 生成字幕每分钟消耗 **2 credits**。仅在 X 的字幕请求需要从语音生成时适用。
 - 如果没有可用原生字幕并返回 HTTP `206`，仍会消耗 **1 credit**。
 
-按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以查询 100 个视频。重试和没有字幕的查询也会消耗额度，所以实际成功数量可能更少。
+如果只获取原生字幕且每次请求都成功，免费版每月大约可以查询 100 个视频。重试和没有字幕的查询也会消耗额度，所以实际成功数量可能更少。
 
 DeepSeek 的额度与 Supadata 分开计算。YouTube Digest 不收款，也不转售 API 服务。建议为两个账号设置消费上限并定期查看用量。
 
@@ -177,7 +177,7 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 
 YouTube Digest 会直接从扩展向服务商发送请求：
 
-1. 把标准化的 YouTube 视频地址发送给 Supadata，用于获取原生字幕。
+1. 把标准化的 YouTube 视频或 X 帖子地址发送给 Supadata。哔哩哔哩字幕直接向 B 站及其字幕服务器获取。
 2. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
 3. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 4. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
@@ -213,7 +213,7 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 - 检查 Supadata Key、剩余额度、限速和账号状态。
 - 没有字幕的查询和手动重试也可能消耗额度。
 
-YouTube Digest 不会自动改用 AI 生成字幕。
+YouTube 和哔哩哔哩无可用字幕轨时会显示提示。X 使用 Supadata 的自动转录模式。
 
 ### AI 请求失败
 
@@ -238,4 +238,4 @@ Agent 还应该在 Chrome 中重新加载扩展，并测试多个真实 YouTube 
 
 ## 开源许可
 
-MIT，详见 [LICENSE](LICENSE)。
+MIT，详见 [LICENSE](LICENSE)。哔哩哔哩的字幕接口代码来自 [Digest for Bilibili](https://github.com/biuworks/bilibili-digest)，保留了[原作者许可](lib/bilibili-digest-LICENSE)。

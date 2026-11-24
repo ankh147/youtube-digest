@@ -12,7 +12,8 @@ const YTD_OPTIONS = (() => {
         "Keys stay in this Chrome profile and are sent only to Supadata and DeepSeek. This open-source extension has no developer server or analytics.",
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
-      supadataHelp: "Used to fetch timestamped YouTube subtitles. ",
+      supadataApiKeyPlaceholder: "Paste your Supadata key",
+      supadataHelp: "Used for YouTube and X subtitles. Bilibili reads subtitle tracks directly. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -20,6 +21,7 @@ const YTD_OPTIONS = (() => {
       providerSummaryLabel: "Supported AI provider",
       providerBadge: "Supported in this version",
       deepseekApiKeyLabel: "DeepSeek API key",
+      deepseekApiKeyPlaceholder: "Paste your DeepSeek key",
       deepseekHelp:
         "YouTube Digest uses DeepSeek V4 Flash for overviews, explanations, translation, and note polishing. ",
       deepseekLink: "Create a DeepSeek API key",
@@ -57,8 +59,7 @@ const YTD_OPTIONS = (() => {
       migrationWarning:
         "Custom provider settings were removed safely. Your Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
       saving: "Saving…",
-      addSupadataKey: "Add a Supadata API key.",
-      addDeepseekKey: "Add a DeepSeek API key.",
+      addApiKey: "Enter at least one API key to save.",
       saved: "Saved. Reopen YouTube Digest to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
       copying: "Copying…",
@@ -82,15 +83,17 @@ const YTD_OPTIONS = (() => {
         "密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
-      supadataHelp: "用于获取带时间戳的 YouTube 字幕。",
+      supadataApiKeyPlaceholder: "粘贴你的 Supadata 密钥",
+      supadataHelp: "用于获取 YouTube 和 X 视频的字幕。哔哩哔哩直接读取站内字幕轨。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
       providerSummaryLabel: "支持的 AI 服务",
       providerBadge: "当前版本支持",
       deepseekApiKeyLabel: "DeepSeek API 密钥",
+      deepseekApiKeyPlaceholder: "粘贴你的 DeepSeek 密钥",
       deepseekHelp:
-        "YouTube Digest 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。",
+        "YouTube Digest 使用 DeepSeek V4 Flash 生成概览、讲解内容、翻译和润色笔记。",
       deepseekLink: "创建 DeepSeek API 密钥",
       deepseekHelpSuffix: "。",
       privacyNote:
@@ -125,8 +128,7 @@ const YTD_OPTIONS = (() => {
       migrationWarning:
         "已安全移除自定义服务设置。Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
       saving: "正在保存…",
-      addSupadataKey: "请添加 Supadata API 密钥。",
-      addDeepseekKey: "请添加 DeepSeek API 密钥。",
+      addApiKey: "请至少填写一把 API 密钥再保存。",
       saved: "已保存。请重新打开 YouTube Digest 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
       copying: "正在复制…",
@@ -404,6 +406,13 @@ const YTD_OPTIONS = (() => {
         );
       }
 
+      for (const element of doc.querySelectorAll("[data-i18n-placeholder]")) {
+        element.placeholder = translate(
+          currentLanguage,
+          element.dataset.i18nPlaceholder,
+        );
+      }
+
       updateLocalizedPrompt(
         customizationPrompt,
         nextDraft.prompt,
@@ -449,12 +458,8 @@ const YTD_OPTIONS = (() => {
         supadataApiKey: supadataApiKeyInput.value,
       });
 
-      if (!settings.supadataApiKey) {
-        setStatus(saveStatus, "addSupadataKey");
-        return;
-      }
-      if (!settings.aiApiKey) {
-        setStatus(saveStatus, "addDeepseekKey");
+      if (!settings.supadataApiKey && !settings.aiApiKey) {
+        setStatus(saveStatus, "addApiKey");
         return;
       }
 

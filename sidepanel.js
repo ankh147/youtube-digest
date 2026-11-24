@@ -26,7 +26,9 @@ let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
 let isAnalysisLoading = false; // Track if analysis is in progress
-let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
+let videoTabId = null;
+let digestRequest = null;
+let notesRequest = 0;
 let errorAction = null;
 
 // --- Translation state ---
@@ -165,7 +167,11 @@ function splitOversizedThought(text, maxChars) {
  * and time limits prevent a malformed Supadata entry from becoming one giant
  * row while punctuation remains the preferred boundary.
  */
-function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
+function groupTranscriptEntries(
+  entries,
+  limits = TRANSCRIPT_SEGMENT_LIMITS,
+  { preserveCueBreaks = false } = {},
+) {
   if (!Array.isArray(entries) || entries.length === 0) return [];
 
   const pieces = [];
@@ -183,7 +189,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       const cleanPart = normalizeCaptionText(sentencePart);
       if (!cleanPart) return;
       const oversizedParts = splitOversizedThought(cleanPart, limits.maxChars);
-      oversizedParts.forEach((part, partIndex) => {
+      oversizedParts.forEach((part) => {
         const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
         pieces.push({
           text: part,
@@ -192,7 +198,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
             /[.!?。！？]["')\]”’）】」』]*$/.test(part) ||
             oversizedParts.length > 1,
           clauseEnd: /[;:,；：，]["')\]”’）】」』]*$/.test(part),
-          sourceOrder: `${entryIndex}:${partIndex}`,
+          entryIndex,
         });
         consumedChars += part.length + 1;
       });
@@ -211,13 +217,25 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       start: current.start,
       text,
       texts: [text],
+      ...(preserveCueBreaks && { displayText: current.cueLines.join("\n") }),
     });
     current = null;
   };
 
   pieces.forEach((piece) => {
-    if (!current) current = { start: piece.start, text: "" };
+    if (!current) current = { start: piece.start, text: "", cueLines: [] };
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
+    if (preserveCueBreaks) {
+      if (current.lastEntryIndex === piece.entryIndex) {
+        const lastLine = current.cueLines.length - 1;
+        current.cueLines[lastLine] = normalizeCaptionText(
+          `${current.cueLines[lastLine]} ${piece.text}`,
+        );
+      } else {
+        current.cueLines.push(piece.text);
+        current.lastEntryIndex = piece.entryIndex;
+      }
+    }
     const elapsed = Math.max(0, piece.start - current.start);
     const comfortablySized = current.text.length >= limits.minChars;
     const reachedIdeal = current.text.length >= limits.idealChars;
@@ -257,26 +275,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
   await evictOldCacheEntries(20);
 
-  const configStatus = await chrome.runtime.sendMessage({
-    action: "checkConfig",
-  });
-
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
-    showConfigError(configStatus);
-    return;
-  }
-
   await checkCurrentTab();
 });
 
-// Listen for messages from the Digest button on YouTube page
+// Listen for messages from the page button and background worker.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "startDigestFromButton") {
     // Load the digest for the current video. Served from cache when we've
     // seen this video before (no API calls); fetched fresh otherwise.
     // (This used to force-clear the cache on every click, which silently
     // burned a transcript credit + analysis tokens per click.)
-    checkCurrentTab();
+    void checkCurrentTab({ expectedTabId: message.tabId });
     sendResponse({ success: true });
   }
   if (message.action === "transcriptProgress") {
@@ -298,20 +307,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ============================================================
 // FOLLOW THE ACTIVE TAB
 // ============================================================
-// The panel watches which tab is in front of it and reacts:
-//   - Front tab is NOT YouTube  -> the panel closes itself (window.close()).
-//     We do this OURSELVES rather than relying only on the background
-//     script's per-tab enable/disable, because Chrome doesn't reliably
-//     apply per-tab panel state to tabs spawned in unusual ways (e.g. a
-//     link opened from another app) — which let the panel linger on
-//     non-YouTube pages.
-//   - Front tab IS YouTube but on a different video -> refresh the digest.
-//     YouTube is a single-page app (clicking a video swaps content without
-//     a reload), so we track URL changes; startDigest() caches per video,
-//     making re-checks instant and free for already-digested videos.
-//
-// Everything is scoped to the window this panel lives in: tab switches in
-// OTHER browser windows must not close this panel or hijack its content.
+// Keep the panel on the active video in this window. Switching windows or
+// finishing an older request must never change the video shown here.
 
 let navigationRefreshTimer = null;
 let panelWindowId = null;
@@ -335,11 +332,12 @@ function panelIsShowingResults() {
 }
 
 /**
- * Reacts to the URL now in front of the panel: close on non-YouTube,
- * refresh the digest when the video changed.
+ * Follow the current tab and invalidate work for the previous video.
  */
-function handleFrontTabUrl(url) {
-  if (!(url || "").startsWith("https://www.youtube.com")) {
+function handleFrontTabUrl(url, tabId) {
+  if (!YTD_SETTINGS.supportsPanel(url)) {
+    digestRequest = null;
+    translationGeneration += 1;
     // Start the position save, then close in this same event callback. Chrome
     // does not reliably honor window.close() after an asynchronous wait.
     void saveCurrentTranscriptViewState();
@@ -347,10 +345,14 @@ function handleFrontTabUrl(url) {
     return;
   }
 
-  const newVideoId = extractVideoId(url);
+  const newVideoId = YTD_SETTINGS.videoFromUrl(url)?.id ?? null;
+  if (digestRequest && (digestRequest.videoId !== newVideoId || digestRequest.tabId !== tabId)) {
+    digestRequest = null;
+    translationGeneration += 1;
+  }
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video).
-  if (newVideoId !== currentVideoId || !panelIsShowingResults()) {
+  if (newVideoId !== currentVideoId || tabId !== videoTabId || !panelIsShowingResults()) {
     scheduleDigestRefresh();
   }
 }
@@ -376,7 +378,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
   const url = getNavigationUrl(changeInfo, tab);
   if (!url) return;
-  handleFrontTabUrl(url);
+  handleFrontTabUrl(url, tabId);
 });
 
 // Fires when a different tab comes to the front — switching tabs, or a new
@@ -387,7 +389,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     const tab = await chrome.tabs.get(tabId);
     // Brand-new tabs may not have committed their URL yet — fall back to
     // the pending one so we judge where the tab is actually going.
-    handleFrontTabUrl(tab.url || tab.pendingUrl || "");
+    handleFrontTabUrl(tab.url || tab.pendingUrl || "", tabId);
   } catch (e) {
     // Tab closed before we could read it — nothing to do.
   }
@@ -405,9 +407,11 @@ function setupEventListeners() {
       errorAction();
       return;
     }
-    if (currentVideoId) {
-      startDigest(currentVideoId, currentVideoUrl);
-    }
+    void checkCurrentTab();
+  });
+
+  document.getElementById("xTranscriptBtn").addEventListener("click", () => {
+    void checkCurrentTab({ approvedVideoId: currentVideoId });
   });
 
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
@@ -472,90 +476,43 @@ function setNotesFilter(showAll) {
 // VIDEO DETECTION
 // ============================================================
 
-async function checkCurrentTab() {
-  try {
-    // The panel belongs only to the active tab. Looking for another open
-    // YouTube tab here can keep an old transcript visible on a non-YouTube
-    // page, so never fall back to background tabs.
-    const tabs = await chrome.tabs.query({
-      active: true,
-      lastFocusedWindow: true,
-    });
-    const tab = tabs[0] || null;
-
-    debugLog("[YouTube Digest Panel] Found tab:", tab?.id, tab?.url);
-
-    if (!tab?.url) {
-      showState("welcome");
-      return;
-    }
-
-    if (!tab.url.startsWith("https://www.youtube.com")) {
-      handleFrontTabUrl(tab.url);
-      return;
-    }
-
-    // Store the tab ID for reliable messaging later
-    youtubeTabId = tab.id;
-
-    const videoId = extractVideoId(tab.url);
-
-    if (videoId) {
-      currentVideoUrl = tab.url;
-
-      try {
-        // Route through background script for reliable message passing
-        const result = await chrome.runtime.sendMessage({
-          action: "relayToContent",
-          payload: { action: "getVideoInfo" },
-        });
-        debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
-        if (result.success && result.response) {
-          currentVideoTitle = result.response.title || "";
-          currentChannelName = result.response.channelName || "";
-          currentVideoDescription = result.response.description || "";
-          currentVideoDuration = result.response.duration || 0;
-        }
-      } catch (e) {
-        console.error("[YouTube Digest Panel] getVideoInfo error:", e);
-        currentVideoTitle = "";
-        currentChannelName = "";
-        currentVideoDescription = "";
-        currentVideoDuration = 0;
-      }
-
-      startDigest(videoId, tab.url);
-    } else {
-      showState("welcome");
-    }
-  } catch (error) {
-    console.error("Tab check error:", error);
-    showState("welcome");
-  }
+function relayToVideo(payload, tabId = videoTabId, videoId = currentVideoId) {
+  return chrome.runtime.sendMessage({ action: "relayToContent", tabId, videoId, payload });
 }
 
-function extractVideoId(url) {
+async function checkCurrentTab({ expectedTabId, approvedVideoId } = {}) {
+  let request;
   try {
-    const urlObj = new URL(url);
-
-    if (
-      urlObj.hostname.includes("youtube.com") &&
-      urlObj.searchParams.has("v")
-    ) {
-      return urlObj.searchParams.get("v");
+    const query = panelWindowId === null
+      ? { active: true, currentWindow: true }
+      : { active: true, windowId: panelWindowId };
+    const [tab] = await chrome.tabs.query(query);
+    if (!tab?.url || (expectedTabId && tab.id !== expectedTabId)) return;
+    if (!YTD_SETTINGS.supportsPanel(tab.url)) {
+      handleFrontTabUrl(tab.url, tab.id);
+      return;
     }
-
-    if (urlObj.hostname === "youtu.be") {
-      return urlObj.pathname.slice(1);
+    const source = YTD_SETTINGS.videoFromUrl(tab.url);
+    if (!source) {
+      digestRequest = null;
+      currentVideoId = null;
+      videoTabId = null;
+      showState("welcome");
+      return;
     }
+    if (digestRequest?.videoId === source.id && digestRequest.tabId === tab.id) return;
+    if (currentVideoId === source.id && videoTabId === tab.id && panelIsShowingResults()) return;
 
-    if (urlObj.pathname.startsWith("/embed/")) {
-      return urlObj.pathname.split("/")[2];
+    request = { videoId: source.id, tabId: tab.id };
+    digestRequest = request;
+    await startDigest(source, tab, request, approvedVideoId === source.id);
+  } catch (error) {
+    console.error("Video check error:", error);
+    if (request && digestRequest === request) {
+      showError("无法加载视频", localizeError(error.message));
     }
-
-    return null;
-  } catch {
-    return null;
+  } finally {
+    if (digestRequest === request) digestRequest = null;
   }
 }
 
@@ -563,150 +520,129 @@ function extractVideoId(url) {
 // DIGEST PIPELINE
 // ============================================================
 
-async function startDigest(videoId, videoUrl) {
-  // Check if we already have this video loaded in memory
-  if (videoId === currentVideoId && currentAnalysis) {
-    showState("results");
-    return;
-  }
-
+async function startDigest(source, tab, request, allowXTranscription) {
+  const videoId = source.id;
   const videoChanged = videoId !== currentVideoId;
-
-  // Every video change invalidates observer work and in-flight translations.
+  const isCurrent = () => digestRequest === request;
   if (videoChanged) {
+    await saveCurrentTranscriptViewState();
+    if (!isCurrent()) return;
     translationGeneration += 1;
-    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+    transcriptScrollObserver?.disconnect();
     transcriptScrollObserver = null;
     resetTranscriptSearch();
     lastTranscriptScrollTop = 0;
-    pendingTranscriptViewState = await loadTranscriptViewState(videoId);
-    // An unseen video always starts in Original, so opening it never spends
-    // translation tokens. A saved choice is restored only for this video.
-    currentTranscriptMode = await loadDisplayLanguageMode(videoId);
-    document
-      .getElementById("contentArea")
-      ?.classList.toggle(
-        "restoring-transcript-view",
-        Boolean(pendingTranscriptViewState),
-      );
-  }
-
-  // Check cache for this video
-  const cached = await loadFromCache(videoId);
-  if (cached) {
-    debugLog("Loading from cache:", videoId);
-    currentVideoId = videoId;
-    currentVideoUrl = videoUrl;
-    currentAnalysis = cached.analysis || null;
-    currentTranscript = cached.transcript;
-    currentTranscriptText = cached.transcriptText;
-    currentTranscriptTimestamped = cached.transcriptTimestamped;
-    currentTranscriptLanguage = cached.transcriptLanguage || null;
-    isAnalysisLoading = false;
-
-    // Restore semantic-segment translations from persistent storage.
-    if (cached.paragraphCache) {
-      for (const [key, value] of Object.entries(cached.paragraphCache)) {
-        transcriptParagraphCache.set(key, value);
-      }
-    }
-    if (cached.interfaceCache) {
-      for (const [key, value] of Object.entries(cached.interfaceCache)) {
-        interfaceTranslationCache.set(key, value);
-      }
-    }
-
-    if (currentVideoTitle || currentChannelName) {
-      const videoInfo = document.getElementById("videoInfo");
-      document.getElementById("videoTitle").textContent = currentVideoTitle;
-      document.getElementById("videoChannel").textContent = currentChannelName;
-      videoInfo.style.display = "block";
-    }
-
-    // Always render transcript first
-    renderTranscript();
-
-    // Render analysis if we have it cached
-    if (currentAnalysis) {
-      renderAnalysisResults(currentAnalysis);
-      highlightMomentsOnPage(currentAnalysis.keyMoments);
-    }
-
-    showState("results");
-    document.getElementById("tabsNav").style.display = "flex";
-    restorePendingTranscriptViewState(videoId);
-
-    // Load notes for this video
-    loadNotes(videoId);
-
-    // Setup explain feature
-    setupExplainFeature();
-    if (currentTranscriptMode !== "original") translateTranscript();
-    return;
+    currentNotes = [];
+    pendingTranscriptViewState = null;
+    currentTranscriptMode = "original";
+    setTranscriptModeButtons("original");
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.classList.toggle("active", button.dataset.tab === "transcript");
+    });
+    document.querySelectorAll(".tab-panel").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.panel === "transcript");
+    });
+    document.getElementById("chapterList").replaceChildren();
+    document.getElementById("quotesList").replaceChildren();
+    document.getElementById("notesList").replaceChildren();
   }
 
   currentVideoId = videoId;
-  currentVideoUrl = videoUrl;
+  currentVideoUrl = source.url;
+  videoTabId = tab.id;
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
   isAnalysisLoading = false;
-
-  if (currentVideoTitle || currentChannelName) {
-    const videoInfo = document.getElementById("videoInfo");
-    document.getElementById("videoTitle").textContent = currentVideoTitle;
-    document.getElementById("videoChannel").textContent = currentChannelName;
-    videoInfo.style.display = "block";
-  }
-
+  currentVideoTitle = "";
+  currentChannelName = "";
+  currentVideoDescription = "";
+  currentVideoDuration = 0;
+  document.getElementById("videoInfo").style.display = "none";
   showState("loading");
-  updateLoading("Fetching transcript", "");
+  updateLoading("正在获取字幕", "");
 
-  const transcriptResult = await chrome.runtime.sendMessage({
-    action: "fetchTranscript",
-    videoId: videoId,
-  });
+  const [viewState, displayMode, cached, config, videoResult] = await Promise.all([
+    loadTranscriptViewState(videoId),
+    loadDisplayLanguageMode(videoId),
+    loadFromCache(videoId),
+    chrome.runtime.sendMessage({ action: "checkConfig" }),
+    relayToVideo({ action: "getVideoInfo" }, tab.id, videoId).catch(() => null),
+  ]);
+  if (!isCurrent()) return;
+  pendingTranscriptViewState = viewState;
+  currentTranscriptMode = displayMode;
+  setTranscriptModeButtons(displayMode);
+  document.getElementById("contentArea")?.classList.toggle(
+    "restoring-transcript-view", Boolean(viewState),
+  );
+  applyVideoInfo(videoResult?.response || cached?.videoInfo, tab.title);
 
-  if (!transcriptResult.success) {
-    if (transcriptResult.error === "NO_SUPADATA_KEY") {
-      showError(
-        "API key missing",
-        "Add your Supadata API key in YouTube Digest Settings.",
-      );
-      return;
-    }
-    showError(
-      "No transcript found",
-      transcriptResult.message || transcriptResult.error,
-    );
+  if (source.platform !== "bilibili" && (!config?.hasSupadataKey || !config?.hasAiKey)) {
+    showConfigError(config || {});
     return;
   }
 
-  currentTranscript = transcriptResult.transcript;
-  currentTranscriptText = transcriptResult.transcriptText;
-  currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
-  currentTranscriptLanguage = transcriptResult.language || null;
+  let digest = cached;
+  if (!digest) {
+    if (source.platform === "x") {
+      if (!videoResult?.response?.hasVideo) {
+        showError("未找到帖子视频", "请等这条帖子的播放器加载后重试，或打开另一条带视频的公开帖子。");
+        return;
+      }
+      if (!allowXTranscription) {
+        showState("xConsent");
+        return;
+      }
+      updateLoading("正在获取字幕", "如果需要从语音生成字幕，可能要等一会儿。");
+    }
+    const result = await chrome.runtime.sendMessage({
+      action: "fetchTranscript", videoId, allowXTranscription,
+    });
+    if (!isCurrent()) return;
+    if (!result?.success) {
+      if (result?.error === "NO_SUPADATA_KEY") {
+        showConfigError({ hasSupadataKey: false, hasAiKey: true });
+      } else {
+        showError("未找到字幕", localizeError(result?.message || result?.error || "Unknown error"));
+      }
+      return;
+    }
+    digest = result;
+  }
 
-  // Render transcript immediately (no LLM needed)
+  if (digest.videoInfo) applyVideoInfo(digest.videoInfo, tab.title);
+  currentAnalysis = digest.analysis || null;
+  currentTranscript = digest.transcript;
+  currentTranscriptText = digest.transcriptText;
+  currentTranscriptTimestamped = digest.transcriptTimestamped;
+  currentTranscriptLanguage = digest.language || digest.transcriptLanguage || null;
+  for (const [key, value] of Object.entries(digest.paragraphCache || {})) {
+    transcriptParagraphCache.set(key, value);
+  }
+  for (const [key, value] of Object.entries(digest.interfaceCache || {})) {
+    interfaceTranslationCache.set(key, value);
+  }
   renderTranscript();
+  if (currentAnalysis) renderAnalysisResults(currentAnalysis);
   showState("results");
-  document.getElementById("tabsNav").style.display = "flex";
   restorePendingTranscriptViewState(videoId);
-
-  // Load notes for this video
-  loadNotes(videoId);
-
-  // Setup explain feature for text selection
+  void loadNotes(videoId);
   setupExplainFeature();
-  if (currentTranscriptMode !== "original") translateTranscript();
+  if (currentTranscriptMode !== "original") void translateTranscript();
+  if (!cached) await saveToCache(videoId);
+}
 
-  // Save transcript to cache (without analysis)
-  await saveToCache(videoId);
-
-  // DON'T run LLM analysis automatically - wait for user to click Overview tab
-  // This saves tokens when user just wants to see the transcript
+function applyVideoInfo(info, fallbackTitle) {
+  currentVideoTitle = info?.title || fallbackTitle || "";
+  currentChannelName = info?.channelName || "";
+  currentVideoDescription = info?.description || "";
+  currentVideoDuration = Number.isFinite(info?.duration) ? info.duration : 0;
+  document.getElementById("videoTitle").textContent = currentVideoTitle;
+  document.getElementById("videoChannel").textContent = currentChannelName;
+  document.getElementById("videoInfo").style.display = currentVideoTitle || currentChannelName ? "block" : "none";
 }
 
 // ============================================================
@@ -733,8 +669,8 @@ function renderLocalizedContent(text, surface, id) {
   const translation = translated
     ? escapeHtml(translated)
     : interfaceTranslationFailures.has(cacheKey)
-      ? '<span class="translation-error">Translation unavailable.</span>'
-      : '<span class="translation-pending">Translating...</span>';
+      ? '<span class="translation-error">暂无法提供翻译。</span>'
+      : '<span class="translation-pending">正在翻译…</span>';
   if (currentTranscriptMode === "bilingual") {
     return `<span class="localized-copy"><span class="localized-original">${escapeHtml(original)}</span><span class="localized-translation">${translation}</span></span>`;
   }
@@ -928,8 +864,8 @@ function renderAnalysisResults(analysis) {
       <div class="quote-meta">
         <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
         <div class="quote-actions">
-          <button class="quote-save-note-btn" title="Save this quote as a note">Note</button>
-          <button class="quote-copy-btn" title="Copy this quote">Copy</button>
+          <button class="quote-save-note-btn" title="将这条引用保存为笔记">笔记</button>
+          <button class="quote-copy-btn" title="复制这条引用">复制</button>
         </div>
       </div>
     `;
@@ -949,9 +885,9 @@ function renderAnalysisResults(analysis) {
         await navigator.clipboard.writeText(
           getLocalizedPlainText(quote.quote, "overview", `quote-${index}`),
         );
-        quoteCopyBtn.textContent = "Copied";
+        quoteCopyBtn.textContent = "已复制";
         setTimeout(() => {
-          quoteCopyBtn.textContent = "Copy";
+          quoteCopyBtn.textContent = "复制";
         }, 1500);
       } catch (err) {
         console.error("Copy failed:", err);
@@ -982,7 +918,7 @@ async function saveQuoteAsNote(quote, btn) {
   if (!currentVideoId) return;
 
   const originalText = btn.textContent;
-  btn.textContent = "Saving...";
+  btn.textContent = "正在保存…";
   btn.disabled = true;
 
   try {
@@ -995,7 +931,7 @@ async function saveQuoteAsNote(quote, btn) {
     });
 
     if (result.success) {
-      btn.textContent = "Saved";
+      btn.textContent = "已保存";
       setTimeout(() => {
         btn.textContent = originalText;
         btn.disabled = false;
@@ -1004,7 +940,7 @@ async function saveQuoteAsNote(quote, btn) {
       loadNotes(currentVideoId);
     } else {
       console.error("[YouTube Digest] Save quote as note failed:", result.error);
-      btn.textContent = "Error";
+      btn.textContent = "错误";
       setTimeout(() => {
         btn.textContent = originalText;
         btn.disabled = false;
@@ -1012,7 +948,7 @@ async function saveQuoteAsNote(quote, btn) {
     }
   } catch (error) {
     console.error("[YouTube Digest] Save quote as note error:", error);
-    btn.textContent = "Error";
+    btn.textContent = "错误";
     setTimeout(() => {
       btn.textContent = originalText;
       btn.disabled = false;
@@ -1069,25 +1005,24 @@ function renderTranscript() {
   const existingBadge = document.getElementById("transcriptSourceBadge");
   if (existingBadge) existingBadge.remove();
 
-  // Group entries using smart sentence-boundary + time-guardrail logic
-  const grouped = groupTranscriptEntries(currentTranscript);
+  const rows = getOriginalTranscriptRows(currentTranscript, currentVideoId);
 
-  grouped.forEach((group) => {
+  rows.forEach((row) => {
     const div = document.createElement("div");
     div.className = "transcript-entry";
-    div.dataset.seconds = group.start;
+    div.dataset.seconds = row.start;
 
-    const minutes = Math.floor(group.start / 60);
-    const seconds = Math.floor(group.start % 60);
+    const minutes = Math.floor(row.start / 60);
+    const seconds = Math.floor(row.start % 60);
     const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
 
     div.innerHTML = `
       <span class="transcript-time">${timestamp}</span>
-      <span class="transcript-text">${renderSubtitleInlineMarkup(group.text)}</span>
+      <span class="transcript-text">${renderSubtitleInlineMarkup(row.text)}</span>
     `;
 
     div.addEventListener("click", (event) =>
-      seekFromTranscriptEntryClick(event, group.start),
+      seekFromTranscriptEntryClick(event, row.start),
     );
     transcriptList.appendChild(div);
   });
@@ -1097,6 +1032,13 @@ function renderTranscript() {
 
   // Start tracking video playback for auto-scroll
   startPlaybackTracking();
+}
+
+function getOriginalTranscriptRows(entries, videoId) {
+  if (!videoId?.startsWith("bili:")) return groupTranscriptEntries(entries);
+
+  // Bilibili's cue timing already provides readable breaks for unpunctuated subtitles.
+  return entries.filter((entry) => typeof entry?.text === "string" && entry.text.trim());
 }
 
 // ============================================================
@@ -1192,8 +1134,8 @@ function updateTranscriptSearchControls(query) {
     count.textContent = !query
       ? ""
       : hasMatches
-        ? `${transcriptSearchIndex + 1} of ${transcriptSearchMatches.length}`
-        : "No matches";
+        ? `第 ${transcriptSearchIndex + 1} 条，共 ${transcriptSearchMatches.length} 条`
+        : "未找到匹配结果";
   }
   if (previous) previous.disabled = !hasMatches;
   if (next) next.disabled = !hasMatches;
@@ -1333,14 +1275,22 @@ function setupTranscriptSearch() {
 }
 
 function getDisplayedTranscriptText() {
-  if (currentTranscriptMode === "original") return currentTranscriptText || "";
+  if (currentTranscriptMode === "original") {
+    if (currentVideoId?.startsWith("bili:")) {
+      return getOriginalTranscriptRows(currentTranscript || [], currentVideoId)
+        .map(({ text }) => text)
+        .join("\n");
+    }
+    return currentTranscriptText || "";
+  }
   return getActiveTranscriptSegments()
     .map((segment) => {
       const translated = transcriptParagraphCache.get(
         transcriptTranslationCacheKey(segment),
       );
-      if (currentTranscriptMode === "zh") return translated || segment.text;
-      return translated ? `${segment.text}\n${translated}` : segment.text;
+      const original = segment.displayText ?? segment.text;
+      if (currentTranscriptMode === "zh") return translated || original;
+      return translated ? `${original}\n${translated}` : original;
     })
     .join("\n\n");
 }
@@ -1351,26 +1301,26 @@ function copyTranscript() {
 
 function exportTranscript() {
   const transcriptContent = getDisplayedTranscriptText();
-  const videoUrl = `https://youtube.com/watch?v=${currentVideoId}`;
+  const videoUrl = currentVideoUrl;
 
   let exportText = "";
-  exportText += `TRANSCRIPT\n`;
+  exportText += `字幕\n`;
   exportText += `${"=".repeat(60)}\n\n`;
-  exportText += `Title: ${currentVideoTitle || "Unknown"}\n`;
-  exportText += `Channel: ${currentChannelName || "Unknown"}\n`;
-  exportText += `URL: ${videoUrl}\n`;
+  exportText += `标题：${currentVideoTitle || "未知"}\n`;
+  exportText += `频道：${currentChannelName || "未知"}\n`;
+  exportText += `网址：${videoUrl}\n`;
   exportText += `\n${"—".repeat(60)}\n\n`;
 
   if (currentVideoDescription) {
-    exportText += `DESCRIPTION:\n${currentVideoDescription}\n`;
+    exportText += `简介：\n${currentVideoDescription}\n`;
     exportText += `\n${"—".repeat(60)}\n\n`;
   }
 
-  exportText += `TRANSCRIPT:\n\n${transcriptContent}\n`;
+  exportText += `字幕：\n\n${transcriptContent}\n`;
   exportText += `\n${"—".repeat(60)}\n`;
-  exportText += `Exported by YouTube Digest\n`;
+  exportText += `由 YouTube Digest 导出\n`;
 
-  const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
+  const filename = `${sanitizeFilename(currentVideoTitle)}-字幕.txt`;
   downloadTextFile(exportText, filename);
 }
 
@@ -1381,6 +1331,8 @@ function exportTranscript() {
 function showState(state) {
   document.getElementById("welcomeState").style.display =
     state === "welcome" ? "flex" : "none";
+  document.getElementById("xConsentState").style.display =
+    state === "xConsent" ? "flex" : "none";
   document.getElementById("loadingState").style.display =
     state === "loading" ? "block" : "none";
   document.getElementById("errorState").style.display =
@@ -1409,24 +1361,72 @@ function updateLoading(title, subtitle) {
   document.getElementById("loadingSubtext").textContent = subtitle;
 }
 
+const ERROR_COPY = new Map([
+  ["Unknown error", "未知错误"],
+  ["NO_AI_KEY", "缺少 AI 服务的 API 密钥"],
+  ["INVALID_AI_KEY", "AI 服务的 API 密钥无效"],
+  ["RATE_LIMITED", "请求频率超限"],
+  ["Supadata API key not configured. Open YouTube Digest Settings.", "尚未配置 Supadata API 密钥。请打开 YouTube Digest 设置。"],
+  ["Your Supadata API key is invalid. Open YouTube Digest Settings.", "你的 Supadata API 密钥无效。请打开 YouTube Digest 设置。"],
+  ["No native subtitle track is available for this video.", "此视频没有可用的原生字幕轨道。"],
+  ["No subtitles found for this video.", "未找到此视频的字幕。"],
+  ["Supadata rate limit reached. Please wait a minute and try again.", "已达到 Supadata 请求频率上限。请等一分钟再试。"],
+  ["Supadata returned an empty transcript for this video.", "Supadata 为此视频返回了空字幕。"],
+  ["Failed to fetch transcript", "获取字幕失败"],
+  ["Transcript processing failed", "字幕处理失败"],
+  ["Transcript processing timed out", "字幕处理超时"],
+  ["Invalid YouTube video ID.", "YouTube 视频 ID 无效。"],
+  ["DeepSeek API key not configured. Open YouTube Digest Settings.", "尚未配置 DeepSeek API 密钥。请打开 YouTube Digest 设置。"],
+  ["DeepSeek API key not configured.", "尚未配置 DeepSeek API 密钥。"],
+  ["DeepSeek API key not configured", "尚未配置 DeepSeek API 密钥"],
+  ["DeepSeek rejected the API key.", "DeepSeek 拒绝了此 API 密钥。"],
+  ["DeepSeek rate-limited this request. Try again shortly.", "此请求受到 DeepSeek 的频率限制。请稍后重试。"],
+  ["Rate limited — try again in a moment", "请求频率超限，请稍后重试"],
+  ["DeepSeek returned an empty response.", "DeepSeek 返回了空响应。"],
+  ["DeepSeek response exceeded the 2 MiB limit.", "DeepSeek 响应超过了 2 MiB 上限。"],
+  ["DeepSeek request was inactive for 50 seconds. Please Retry.", "DeepSeek 请求已连续 50 秒无响应。请重试。"],
+  ["DeepSeek request exceeded the 120-second limit. Please Retry.", "DeepSeek 请求超过了 120 秒上限。请重试。"],
+  ["Failed to analyze transcript", "分析字幕失败"],
+  ["Failed to explain selection", "讲解所选内容失败"],
+  ["Translation request timed out after 130 seconds. Please Retry.", "翻译请求在 130 秒后超时。请重试。"],
+  ["Translation unavailable.", "暂无法提供翻译。"],
+  ["Translation failed.", "翻译失败。"],
+  ["Translation failed", "翻译失败"],
+  ["Translation returned no valid Chinese segments", "翻译未返回有效的中文段落"],
+  ["Missing or invalid Chinese translation", "缺少中文翻译或翻译无效"],
+  ["Failed to fetch", "请求失败"],
+]);
+
+function localizeError(message) {
+  const text = String(message || "");
+  return (ERROR_COPY.get(text) ?? text)
+    .replace(/^Supadata API error: (\d{3})$/, "Supadata API 错误：$1")
+    .replace(/^DeepSeek error: (\d{3})$/, "DeepSeek 错误：$1")
+    .replace(/^Job polling failed: (\d{3})$/, "查询字幕任务进度失败：$1")
+    .replace(/^Could not load prompt file: (.+)$/, "无法加载提示词文件：$1")
+    .replace(/^Prompt section not found: (.+)$/, "未找到提示词章节：$1")
+    .replace(/^Unsupported translation target: (.+)$/, "不支持的翻译目标语言：$1")
+    .replace(/^Unsupported translation content type: (.+)$/, "不支持翻译此内容类型：$1");
+}
+
 function showError(title, message) {
   errorAction = null;
   showState("error");
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
-  document.getElementById("errorBtn").textContent = "Try Again";
+  document.getElementById("errorBtn").textContent = "重试";
 }
 
 function showConfigError(configStatus) {
   const missingKeys = [];
   if (!configStatus.hasSupadataKey) missingKeys.push("Supadata");
-  if (!configStatus.hasAiKey) missingKeys.push("AI provider");
+  if (!configStatus.hasAiKey) missingKeys.push("AI 服务");
 
   showState("error");
-  document.getElementById("errorTitle").textContent = "API Keys Missing";
+  document.getElementById("errorTitle").textContent = "缺少 API 密钥";
   document.getElementById("errorMessage").textContent =
-    `Add your ${missingKeys.join(" and ")} API key${missingKeys.length === 1 ? "" : "s"} in YouTube Digest Settings.`;
-  document.getElementById("errorBtn").textContent = "Open Settings";
+    `请在 YouTube Digest 设置中添加你的 ${missingKeys.join(" 和 ")} API 密钥。`;
+  document.getElementById("errorBtn").textContent = "打开设置";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
@@ -1508,6 +1508,7 @@ async function triggerAnalysis() {
     return;
 
   isAnalysisLoading = true;
+  const analyzedVideoId = currentVideoId;
 
   // Show loading indicators in the Overview tab
   const chapterList = document.getElementById("chapterList");
@@ -1515,10 +1516,10 @@ async function triggerAnalysis() {
 
   if (chapterList)
     chapterList.innerHTML =
-      '<li class="chapter-item" style="color: var(--text-muted); border: none;">Loading chapters...</li>';
+      '<li class="chapter-item" style="color: var(--text-muted); border: none;">正在加载章节…</li>';
   if (quotesList)
     quotesList.innerHTML =
-      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">Loading quotes...</div>';
+      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">正在加载引用…</div>';
 
   try {
     const analysisResult = await chrome.runtime.sendMessage({
@@ -1530,23 +1531,24 @@ async function triggerAnalysis() {
       videoDuration: currentVideoDuration,
     });
 
+    if (analyzedVideoId !== currentVideoId) return;
     if (!analysisResult.success) {
       if (chapterList)
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Analysis failed: ${escapeHtml(analysisResult.error || "Unknown error")}</li>`;
+        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">分析失败：${escapeHtml(localizeError(analysisResult.error || "Unknown error"))}</li>`;
       isAnalysisLoading = false;
       return;
     }
 
     currentAnalysis = analysisResult.analysis;
     renderAnalysisResults(currentAnalysis);
-    highlightMomentsOnPage(currentAnalysis.keyMoments);
 
     // Save to cache now that we have analysis
     await saveToCache(currentVideoId);
   } catch (error) {
+    if (analyzedVideoId !== currentVideoId) return;
     console.error("[YouTube Digest Panel] Analysis error:", error);
     if (chapterList)
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Error: ${escapeHtml(error.message)}</li>`;
+      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">错误：${escapeHtml(localizeError(error.message))}</li>`;
   }
 
   isAnalysisLoading = false;
@@ -1563,32 +1565,8 @@ async function seekTo(seconds) {
     return;
   }
 
-  const payload = {
-    action: "seekTo",
-    seconds: Number(seconds),
-  };
-
   try {
-    // Try direct messaging to the stored YouTube tab first (fastest/reliable)
-    if (youtubeTabId) {
-      try {
-        await chrome.tabs.sendMessage(youtubeTabId, payload);
-        debugLog("[YouTube Digest Panel] seekTo direct success");
-        return;
-      } catch (directErr) {
-        debugLog(
-          "[YouTube Digest Panel] Direct seekTo failed, falling back to relay:",
-          directErr.message,
-        );
-      }
-    }
-
-    // Fallback: route through background script
-    const result = await chrome.runtime.sendMessage({
-      action: "relayToContent",
-      payload,
-    });
-    debugLog("[YouTube Digest Panel] seekTo relay result:", result);
+    await relayToVideo({ action: "seekTo", seconds: Number(seconds) });
   } catch (error) {
     console.error("[YouTube Digest Panel] seekTo error:", error);
   }
@@ -1605,26 +1583,8 @@ function playNote(note) {
   if (note.videoId && note.videoId === currentVideoId) {
     seekTo(note.timestampSeconds);
   } else {
-    // note.timestampedUrl already includes the &t=<seconds>s anchor
+    // The link uses the timestamp format for the source platform.
     chrome.tabs.create({ url: note.timestampedUrl });
-  }
-}
-
-async function highlightMomentsOnPage(moments) {
-  if (!moments || !moments.length) return;
-
-  try {
-    // Route through background script for reliable message passing
-    await chrome.runtime.sendMessage({
-      action: "relayToContent",
-      payload: {
-        action: "highlightMoments",
-        moments: moments,
-        videoDuration: currentVideoDuration,
-      },
-    });
-  } catch (error) {
-    console.error("Highlight error:", error);
   }
 }
 
@@ -1667,7 +1627,7 @@ async function copyToClipboardWithFeedback(text, buttonId) {
 
   const success = await copyToClipboard(text);
   if (success) {
-    btn.textContent = "Copied";
+    btn.textContent = "已复制";
     setTimeout(() => {
       btn.textContent = original;
     }, 2000);
@@ -1729,10 +1689,10 @@ function setupExplainFeature() {
   tooltip.id = "explainTooltip";
   tooltip.className = "explain-tooltip";
   tooltip.setAttribute("role", "toolbar");
-  tooltip.setAttribute("aria-label", "Selected transcript actions");
+  tooltip.setAttribute("aria-label", "所选字幕的操作");
   tooltip.innerHTML = `
-    <button class="explain-btn" type="button">Explain</button>
-    <button class="selection-note-btn" type="button">Note</button>
+    <button class="explain-btn" type="button">讲解</button>
+    <button class="selection-note-btn" type="button">笔记</button>
   `;
   tooltip.style.display = "none";
   document.body.appendChild(tooltip);
@@ -1828,7 +1788,7 @@ function setupExplainFeature() {
 
       const button = event.currentTarget;
       const originalText = button.textContent;
-      button.textContent = "Saving...";
+      button.textContent = "正在保存…";
       button.disabled = true;
 
       try {
@@ -1845,7 +1805,7 @@ function setupExplainFeature() {
           throw new Error(result?.error || "Could not save note");
         }
 
-        button.textContent = "Saved";
+        button.textContent = "已保存";
         loadNotes(currentVideoId);
         setTimeout(() => {
           tooltip.style.display = "none";
@@ -1854,7 +1814,7 @@ function setupExplainFeature() {
         }, 900);
       } catch (error) {
         console.error("[YouTube Digest] Save selected note error:", error);
-        button.textContent = "Error";
+        button.textContent = "错误";
         setTimeout(() => {
           button.textContent = originalText;
           button.disabled = false;
@@ -1874,14 +1834,14 @@ async function showExplanation(selectedText) {
   modal.innerHTML = `
     <div class="explain-modal">
       <div class="explain-modal-header">
-        <div class="explain-modal-title">Explain</div>
-        <button class="explain-modal-close" id="closeExplain">Close</button>
+        <div class="explain-modal-title">讲解</div>
+        <button class="explain-modal-close" id="closeExplain">关闭</button>
       </div>
       <div class="explain-selected-text">"${escapeHtml(selectedText.substring(0, 200))}${selectedText.length > 200 ? "..." : ""}"</div>
       <div class="explain-modal-content" id="explanationContent">
         <div class="explain-loading">
           <div class="loading-bar"></div>
-          <span>Analyzing...</span>
+          <span>正在分析…</span>
         </div>
       </div>
     </div>
@@ -1913,11 +1873,11 @@ async function showExplanation(selectedText) {
     if (result.success) {
       contentDiv.innerHTML = `<div class="explain-text">${escapeHtml(result.explanation).replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>")}</div>`;
     } else {
-      contentDiv.innerHTML = `<div class="explain-error">Failed to get explanation: ${escapeHtml(result.error)}</div>`;
+      contentDiv.innerHTML = `<div class="explain-error">未能获取讲解：${escapeHtml(localizeError(result.error))}</div>`;
     }
   } catch (error) {
     const contentDiv = document.getElementById("explanationContent");
-    contentDiv.innerHTML = `<div class="explain-error">Error: ${escapeHtml(error.message)}</div>`;
+    contentDiv.innerHTML = `<div class="explain-error">错误：${escapeHtml(localizeError(error.message))}</div>`;
   }
 }
 
@@ -1971,6 +1931,10 @@ async function saveToCache(videoId) {
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
+      videoInfo: {
+        title: currentVideoTitle, channelName: currentChannelName,
+        description: currentVideoDescription, duration: currentVideoDuration,
+      },
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
@@ -2079,13 +2043,14 @@ async function updateCache() {
  * @param {string|null} videoId - Filter by video ID, or null for all notes
  */
 async function loadNotes(videoId) {
+  const request = ++notesRequest;
   try {
     const result = await chrome.runtime.sendMessage({
       action: "getNotes",
       videoId: videoId,
     });
 
-    if (result.success) {
+    if (result.success && request === notesRequest && (!videoId || videoId === currentVideoId)) {
       currentNotes = result.notes || [];
       currentNotesFilterVideoId = videoId;
       renderNotes(result.notes, videoId);
@@ -2109,8 +2074,8 @@ function renderNotes(notes, filteredVideoId) {
   if (!notes || notes.length === 0) {
     notesIntro.style.display = "block";
     notesIntro.textContent = filteredVideoId
-      ? "No notes for this video yet. Hover over the video and click Note to save."
-      : "No notes saved yet. Hover over a video and click Note to save.";
+      ? "此视频还没有笔记。将鼠标移到视频上，点击「笔记」即可保存。"
+      : "还没有已保存的笔记。将鼠标移到视频上，点击「笔记」即可保存。";
     return;
   }
 
@@ -2127,10 +2092,10 @@ function renderNotes(notes, filteredVideoId) {
       </div>
       <div class="note-text">${renderLocalizedContent(note.text, "notes", translationId)}</div>
       <div class="note-actions">
-        <button class="note-action-btn note-copy-text">Copy text</button>
-        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">Copy timestamp</button>
-        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">Play</button>
-        <button class="note-delete" data-id="${escapeHtml(note.id)}" type="button" aria-label="Delete note" title="Delete note">
+        <button class="note-action-btn note-copy-text">复制文本</button>
+        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">复制时间戳</button>
+        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">播放</button>
+        <button class="note-delete" data-id="${escapeHtml(note.id)}" type="button" aria-label="删除笔记" title="删除笔记">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 6h18"></path>
             <path d="M8 6V4h8v2"></path>
@@ -2165,9 +2130,9 @@ function renderNotes(notes, filteredVideoId) {
             getLocalizedPlainText(note.text, "notes", translationId),
           );
           const btn = noteEl.querySelector(".note-copy-text");
-          btn.textContent = "Copied";
+          btn.textContent = "已复制";
           setTimeout(() => {
-            btn.textContent = "Copy text";
+            btn.textContent = "复制文本";
           }, 2000);
         } catch (err) {
           console.error("Copy failed:", err);
@@ -2181,9 +2146,9 @@ function renderNotes(notes, filteredVideoId) {
         try {
           await navigator.clipboard.writeText(note.timestampedUrl);
           const btn = noteEl.querySelector(".note-copy-link");
-          btn.textContent = "Copied";
+          btn.textContent = "已复制";
           setTimeout(() => {
-            btn.textContent = "Copy timestamp";
+            btn.textContent = "复制时间戳";
           }, 2000);
         } catch (err) {
           console.error("Copy failed:", err);
@@ -2277,12 +2242,10 @@ function stopPlaybackTracking() {
  */
 async function playbackTrackingTick() {
   try {
-    const result = await chrome.runtime.sendMessage({
-      action: "relayToContent",
-      payload: { action: "getCurrentTime" },
-    });
+    const videoId = currentVideoId;
+    const result = await relayToVideo({ action: "getCurrentTime" });
 
-    if (!result.success || !result.response) return;
+    if (videoId !== currentVideoId || !result.success || !result.response) return;
 
     const currentTime = result.response.currentTime || 0;
     highlightActiveEntry(currentTime);
@@ -2325,10 +2288,10 @@ function highlightActiveEntry(currentSeconds) {
   // Find the entry whose time range contains the current playback time
   let activeEntry = null;
   entries.forEach((entry, index) => {
-    const entrySeconds = parseInt(entry.dataset.seconds);
+    const entrySeconds = Number(entry.dataset.seconds);
     const nextEntry = entries[index + 1];
     const nextSeconds = nextEntry
-      ? parseInt(nextEntry.dataset.seconds)
+      ? Number(nextEntry.dataset.seconds)
       : Infinity;
 
     if (currentSeconds >= entrySeconds && currentSeconds < nextSeconds) {
@@ -2549,7 +2512,9 @@ async function saveDisplayLanguageMode(videoId, mode) {
 }
 
 function getActiveTranscriptSegments() {
-  return groupTranscriptEntries(currentTranscript || []);
+  return groupTranscriptEntries(currentTranscript || [], TRANSCRIPT_SEGMENT_LIMITS, {
+    preserveCueBreaks: currentVideoId?.startsWith("bili:"),
+  });
 }
 
 function transcriptTranslationCacheKey(segment) {
@@ -2603,14 +2568,14 @@ async function handleDisplayLanguageModeChange(mode) {
 }
 
 function renderTranscriptSegmentContent(segment, mode, translated, error) {
-  const original = renderSubtitleInlineMarkup(segment.text);
+  const original = renderSubtitleInlineMarkup(segment.displayText ?? segment.text);
   let translationHtml = "";
   if (translated) {
     translationHtml = renderSubtitleInlineMarkup(translated);
   } else if (error) {
-    translationHtml = `${escapeHtml(error)}<button class="translation-retry-btn" type="button">Retry</button>`;
+    translationHtml = `${escapeHtml(localizeError(error))}<button class="translation-retry-btn" type="button">重试</button>`;
   } else {
-    translationHtml = "Waiting for translation…";
+    translationHtml = "等待翻译…";
   }
 
   if (mode === "bilingual") {
@@ -2799,7 +2764,7 @@ function retryTranslationSegment(index, generation) {
     const translation = row.querySelector(".transcript-translation");
     if (translation) {
       translation.className = "transcript-translation translation-pending";
-      translation.textContent = "Retrying…";
+      translation.textContent = "正在重试…";
     }
   }
   activeTranslationQueue.enqueue(index, true);
@@ -2894,6 +2859,7 @@ function setTranslatingSpinner(show) {
 globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   sendTranslationMessage,
   groupTranscriptEntries,
+  getOriginalTranscriptRows,
   splitOversizedThought,
   alignTranslatedSegmentBatch,
   findLiteralTranscriptMatches,

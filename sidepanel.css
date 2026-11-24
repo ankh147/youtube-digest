@@ -757,6 +757,12 @@ body {
   line-height: 1.55;
 }
 
+.transcript-text,
+.transcript-original {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
 .transcript-copy {
   min-width: 0;
   flex: 1;

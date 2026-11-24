@@ -1,6 +1,6 @@
 # Privacy
 
-Effective: July 28, 2026
+Effective: November 24, 2026 for this local version
 
 YouTube Digest is a GitHub-only, bring-your-own-key Chrome extension. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
 
@@ -8,7 +8,7 @@ YouTube Digest is a GitHub-only, bring-your-own-key Chrome extension. It has no 
 
 Depending on the feature you use, YouTube Digest handles:
 
-- the canonical URL and video ID of the active YouTube video;
+- the canonical URL and identifier of the active YouTube video, X video post, or Bilibili video and part;
 - transcript text and timestamps;
 - video metadata such as title, channel, description, and duration;
 - text you select in the transcript and nearby transcript context;
@@ -22,7 +22,11 @@ Depending on the feature you use, YouTube Digest handles:
 
 ### Supadata
 
-YouTube Digest sends the canonical YouTube video URL to `https://api.supadata.ai` with your Supadata API key. Supadata returns the transcript and timestamps. A Supadata key is required for transcript retrieval.
+YouTube Digest sends the canonical YouTube video URL or public X post URL to `https://api.supadata.ai` with your Supadata API key. Supadata returns the transcript and timestamps. On X, the service may transcribe the audio after you select **获取字幕**.
+
+### Bilibili
+
+The Bilibili integration requests the video and subtitle-track metadata from `api.bilibili.com`. The browser can attach your existing Bilibili session to requests sent to Bilibili. Subtitle text is downloaded from Bilibili’s `hdslb.com` CDN without cookies. The extension does not request the Chrome `cookies` permission.
 
 ### DeepSeek
 
@@ -36,7 +40,7 @@ The published version sends AI feature content to DeepSeek V4 Flash at `https://
 
 The endpoint and `deepseek-v4-flash` model are fixed in the published Settings page. You provide one DeepSeek API key. To use another provider or model, you must adapt your own local source copy and its permissions. The Settings page provides a coding-agent prompt for that purpose and warns you never to include an API key in the prompt or chat.
 
-Requests go directly from the extension to Supadata or DeepSeek. They are authenticated with the keys you supply. YouTube Digest's developer does not proxy or receive these requests.
+Requests go directly from the extension to Bilibili, Supadata or DeepSeek. Supadata and DeepSeek use the keys you supply. The developer does not proxy or receive these requests.
 
 Those services process data under their own terms, privacy policies, retention practices, and account settings. Do not send confidential, personal, or regulated content unless their terms and your obligations permit it.
 
@@ -65,11 +69,11 @@ Clearing local data does not delete information already processed or retained by
 
 YouTube Digest uses Chrome permissions for these purposes:
 
-- `sidePanel`: display the YouTube Digest interface beside YouTube.
+- `sidePanel`: display the YouTube Digest interface beside supported video pages.
 - `storage`: store settings, keys, notes, and cached results locally.
-- `tabs`: identify and interact with the active YouTube tab.
+- `tabs`: identify and interact with the active video tab.
 - `scripting`: coordinate the extension's YouTube page controls.
-- YouTube host access: read the active video's URL and metadata and provide timestamp controls.
+- YouTube, X/Twitter and Bilibili host access: read the active video’s URL and metadata and provide timestamp controls. Bilibili API and CDN access is used to retrieve subtitle tracks.
 - Supadata host access: retrieve transcripts.
 - DeepSeek host access: provide AI overviews, explanations, translation, and note polishing through DeepSeek V4 Flash.
 
