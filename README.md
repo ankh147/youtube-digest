@@ -56,6 +56,20 @@ If you prefer to do it yourself:
 
 Because this is an unpacked extension, it does not update automatically. After downloading an update or changing local files, click **Reload** on the YouTube Digest card at `chrome://extensions`, then refresh open YouTube tabs. Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location.
 
+## Install on iPhone or iPad with Safari
+
+The Safari version uses one Xcode project for iPhone and iPad. Installing on a physical device requires a Mac with Xcode and Apple development signing. To test in Simulator, select an iPhone or iPad simulator in the same project.
+
+1. In the project directory, run `npm run package:safari`. It runs the release checks before generating the Xcode project.
+2. Open the Xcode project printed by the command. Select your signing team for both the app and Safari extension targets, and run `YouTube Digest` on the connected iPhone or iPad.
+3. Open Settings → Apps → Safari → Extensions on the device and turn on YouTube Digest. Open a supported video in Safari and use the toolbar's extensions menu to allow access to the current website.
+4. Tap **摘要** to open the panel. Open **设置** in the panel to enter your API keys. Safari keeps its own local keys, cache, and notes separately from Chrome.
+
+On iPhone, the panel fills the Safari webpage. Tap **返回视频** to return to the video, or tap a timestamp to seek and return automatically.
+
+- If the YouTube mobile site doesn't provide a readable transcript, use **Request Desktop Website** in Safari's page menu and reopen the panel.
+- If Safari asks for access to Bilibili's subtitle servers, tap **授权并重试** in the panel. Timestamp seeking requires a player on the webpage.
+
 ## Set up your API keys
 
 Native subtitles work without API keys. Configure the keys for the features you want to use:
@@ -95,7 +109,7 @@ Model: deepseek-v4-flash
 
 YouTube Digest sends every DeepSeek request in non-thinking mode for responsive, predictable interactions. The endpoint and model are fixed in Settings, so the only AI credential you enter is your DeepSeek API key. To use another provider or model, copy the safe customization prompt in Settings and give it to a coding agent for your local copy. Never add an API key to that prompt or chat.
 
-Keys and settings are stored in Chrome's local extension storage on your device. Release builds do not include or use `config.js`.
+Chrome and Safari each keep keys and settings in their local extension storage. Release builds do not include or use `config.js`.
 
 ## Use YouTube Digest
 
@@ -111,14 +125,14 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
 - YouTube transcripts read from the video's own transcript panel.
-- Subtitle tracks exposed by the player on public X video posts. Timestamp links for X work in Chrome with this extension.
+- Subtitle tracks exposed by the player on public X video posts. Timestamp links for X work in browsers with this extension installed.
 - Bilibili BV video pages and individual parts read their subtitle tracks directly. Some tracks require signing in to Bilibili. Videos without a subtitle track cannot be transcribed by this integration.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - AI overviews, selected-text explanations, translation, and automatic note polishing.
 - Local notes and a local cache for recent transcript and digest results.
 - DeepSeek V4 Flash for all published AI features. Other providers require a local code adaptation and are not supported by this published version.
 
-Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
+Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. The Safari version is for the web players on the three platforms. Firefox and other browsers are outside the supported scope.
 
 The extension checks the local cache first, then reads native subtitles. It marks unconfirmed coverage and labels overviews based on partial subtitles. On YouTube and X, you can then choose a Supadata lookup (`mode=native`) or full-video transcription (`mode=generate`). Bilibili reads its own subtitle tracks.
 

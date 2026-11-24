@@ -10,6 +10,20 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+function getEmbeddedSafariContext() {
+  const location = window.location;
+  if (location?.protocol !== "safari-web-extension:" || window.parent === window) return null;
+  const params = new URL(location.href).searchParams;
+  const tab = params.get("tab");
+  const videoId = params.get("video");
+  if (!tab || !/^\d+$/.test(tab) || !YTD_SETTINGS.videoFromId(videoId)) return null;
+  const tabId = Number(tab);
+  return Number.isSafeInteger(tabId) ? { tabId, videoId, readingLayout: params.get("layout") === "reading" } : null;
+}
+
+const embeddedSafariContext = getEmbeddedSafariContext();
+const bilibiliSubtitleAccess = { origins: ["https://api.bilibili.com/*", "https://*.hdslb.com/*"] };
+
 // ============================================================
 // STATE
 // ============================================================
@@ -30,6 +44,7 @@ let currentVideoDuration = 0;
 let overviewRequest = null;
 let overviewError = "";
 let seekRequest = 0;
+let safariPlaybackPosition;
 let videoTabId = null;
 let digestRequest = null;
 let notesRequest = 0;
@@ -283,6 +298,7 @@ function groupTranscriptEntries(
 // ============================================================
 
 document.addEventListener("DOMContentLoaded", async () => {
+  if (embeddedSafariContext) setupSafariPanel();
   setTranscriptModeButtons("original");
   setupEventListeners();
   await evictOldCacheEntries(20);
@@ -324,9 +340,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 let navigationRefreshTimer = null;
 let panelWindowId = null;
-chrome.windows.getCurrent().then((w) => {
-  panelWindowId = w.id;
-});
+if (!embeddedSafariContext) {
+  chrome.windows.getCurrent().then((w) => {
+    panelWindowId = w.id;
+  });
+}
 
 function scheduleDigestRefresh() {
   // Small delay lets YouTube finish rendering the new video's title and
@@ -382,30 +400,23 @@ function getNavigationUrl(changeInfo, tab) {
   return tab.pendingUrl || tab.url || "";
 }
 
-// Fires when a tab starts or completes navigation, including YouTube's
-// no-reload navigation. The completion event is a deliberate second close
-// attempt for the first non-YouTube page.
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!tab.active) return;
-  if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
-  const url = getNavigationUrl(changeInfo, tab);
-  if (!url) return;
-  handleFrontTabUrl(url, tabId);
-});
+if (!embeddedSafariContext) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!tab.active) return;
+    if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
+    const url = getNavigationUrl(changeInfo, tab);
+    if (!url) return;
+    handleFrontTabUrl(url, tabId);
+  });
 
-// Fires when a different tab comes to the front — switching tabs, or a new
-// tab being opened (including ones opened by clicking links in other apps).
-chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-  if (panelWindowId !== null && windowId !== panelWindowId) return;
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    // Brand-new tabs may not have committed their URL yet — fall back to
-    // the pending one so we judge where the tab is actually going.
-    handleFrontTabUrl(tab.url || tab.pendingUrl || "", tabId);
-  } catch (e) {
-    // Tab closed before we could read it — nothing to do.
-  }
-});
+  chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+    if (panelWindowId !== null && windowId !== panelWindowId) return;
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      handleFrontTabUrl(tab.url || tab.pendingUrl || "", tabId);
+    } catch {}
+  });
+}
 
 function setupEventListeners() {
   // Tab switching
@@ -478,6 +489,64 @@ function setupEventListeners() {
   });
 }
 
+function setupSafariPanel() {
+  document.documentElement.classList.add("safari-embedded");
+  const closeButton = document.getElementById("closeSafariPanelBtn");
+  closeButton.hidden = false;
+  if (embeddedSafariContext.readingLayout) {
+    document.documentElement.classList.add("safari-reading");
+    closeButton.textContent = "返回视频";
+    window.addEventListener("message", (event) => {
+      if (!event.isTrusted || event.source !== window.parent) return;
+      const data = event.data;
+      if (data?.action === "safariDigestSeekFailed" && data.request === seekRequest) {
+        document.getElementById("seekStatus").textContent = data.error;
+      }
+      if (data?.action === "safariDigestPlaybackPosition" && data.videoId === currentVideoId) {
+        safariPlaybackPosition = Number.isFinite(data.seconds) ? data.seconds : undefined;
+      }
+    });
+  }
+  closeButton.addEventListener("click", () => void closeSafariPanel());
+  const noteButton = document.getElementById("savePlaybackNoteBtn");
+  noteButton.hidden = false;
+  noteButton.addEventListener("click", async () => {
+    const videoId = currentVideoId;
+    const status = document.getElementById("seekStatus");
+    if (!videoId || !currentTranscript) {
+      status.textContent = "请先获取字幕。";
+      return;
+    }
+    noteButton.disabled = true;
+    status.textContent = "正在保存笔记…";
+    try {
+      const seconds = embeddedSafariContext.readingLayout
+        ? safariPlaybackPosition
+        : (await relayToVideo({ action: "getCurrentTime" }))?.response?.currentTime;
+      if (!Number.isFinite(seconds)) throw new Error("无法读取当前播放时间。");
+      const saved = await chrome.runtime.sendMessage({
+        action: "saveNote",
+        videoId,
+        timestamp: Math.max(0, Math.floor(seconds) - 3),
+        videoTitle: currentVideoTitle,
+        channelName: currentChannelName,
+      });
+      if (!saved?.success) throw new Error(saved?.error || "无法保存笔记。");
+      status.textContent = "笔记已保存。";
+      if (videoId === currentVideoId) void loadNotes(currentNotesFilterVideoId);
+    } catch (error) {
+      status.textContent = localizeError(error.message);
+    } finally {
+      noteButton.disabled = false;
+    }
+  });
+}
+
+async function closeSafariPanel() {
+  await saveCurrentTranscriptViewState();
+  window.parent.postMessage({ action: "closeSafariDigest" }, "*");
+}
+
 function setNotesFilter(showAll) {
   const thisVideoButton = document.getElementById("notesFilterThis");
   const allNotesButton = document.getElementById("notesFilterAll");
@@ -498,10 +567,24 @@ function relayToVideo(payload, tabId = videoTabId, videoId = currentVideoId) {
 async function checkCurrentTab({ expectedTabId } = {}) {
   let request;
   try {
-    const query = panelWindowId === null
-      ? { active: true, currentWindow: true }
-      : { active: true, windowId: panelWindowId };
-    const [tab] = await chrome.tabs.query(query);
+    let selectedTab;
+    if (embeddedSafariContext) {
+      selectedTab = await chrome.runtime.sendMessage({
+        action: "getSafariPanelVideo",
+        ...embeddedSafariContext,
+      });
+      if (!selectedTab) {
+        showError("无法加载视频", "视频页面已切换，请重新打开摘要。");
+        return;
+      }
+    } else {
+      const query = panelWindowId === null
+        ? { active: true, currentWindow: true }
+        : { active: true, windowId: panelWindowId };
+      const [tab] = await chrome.tabs.query(query);
+      selectedTab = tab;
+    }
+    const tab = selectedTab;
     if (!tab?.url || (expectedTabId && tab.id !== expectedTabId)) return;
     if (!YTD_SETTINGS.supportsPanel(tab.url)) {
       handleFrontTabUrl(tab.url, tab.id);
@@ -523,7 +606,7 @@ async function checkCurrentTab({ expectedTabId } = {}) {
     await startDigest(source, tab, request);
   } catch (error) {
     console.error("Video check error:", error);
-    if (request && digestRequest === request) {
+    if ((request && digestRequest === request) || (embeddedSafariContext && !request)) {
       showError("无法加载视频", localizeError(error.message));
     }
   } finally {
@@ -609,10 +692,7 @@ async function startDigest(source, tab, request) {
     const result = await fetchTranscriptForVideo(request, "web");
     if (!isCurrent()) return;
     if (!result?.success) {
-      transcriptAcquisition = {
-        missing: true,
-        message: localizeError(result?.message || result?.error || "没有读到网页字幕。"),
-      };
+      transcriptAcquisition = transcriptFailure(result);
       showState("transcriptFallback");
       return;
     }
@@ -628,6 +708,19 @@ function fetchTranscriptForVideo(request, method) {
     action: "fetchTranscript", videoId: request.videoId, tabId: request.tabId,
     method, duration: currentVideoDuration,
   });
+}
+
+function transcriptFailure(result) {
+  const needsBilibiliAccess = Boolean(embeddedSafariContext && currentVideoId?.startsWith("bili:") &&
+    result?.error === "Load failed");
+  return {
+    missing: !currentTranscript,
+    needsBilibiliAccess,
+    settings: ["NO_SUPADATA_KEY", "INVALID_SUPADATA_KEY"].includes(result?.error),
+    message: needsBilibiliAccess
+      ? "Safari 未能连接哔哩哔哩的字幕服务。请允许访问字幕接口和下载服务器后重试。"
+      : localizeError(result?.message || result?.error || "没有读到字幕。"),
+  };
 }
 
 function coverageForDigest(digest) {
@@ -672,6 +765,7 @@ function displayDigest(digest) {
 async function requestTranscriptReplacement(method) {
   if (!currentVideoId || digestRequest) return;
   const request = { videoId: currentVideoId, tabId: videoTabId };
+  const needsBilibiliAccess = method === "web" && transcriptAcquisition?.needsBilibiliAccess;
   digestRequest = request;
   transcriptAcquisition = {
     missing: !currentTranscript,
@@ -681,14 +775,22 @@ async function requestTranscriptReplacement(method) {
   renderTranscriptAcquisition();
 
   try {
+    if (needsBilibiliAccess) {
+      const granted = await chrome.permissions.request(bilibiliSubtitleAccess);
+      if (digestRequest !== request) return;
+      if (!granted) {
+        transcriptAcquisition = {
+          missing: !currentTranscript,
+          needsBilibiliAccess: true,
+          message: "读取 B 站字幕需要访问哔哩哔哩的字幕接口和下载服务器。",
+        };
+        return;
+      }
+    }
     const result = await fetchTranscriptForVideo(request, method);
     if (digestRequest !== request) return;
     if (!result?.success) {
-      transcriptAcquisition = {
-        missing: !currentTranscript,
-        settings: ["NO_SUPADATA_KEY", "INVALID_SUPADATA_KEY"].includes(result?.error),
-        message: localizeError(result?.message || result?.error || "没有取到字幕。"),
-      };
+      transcriptAcquisition = transcriptFailure(result);
       return;
     }
 
@@ -719,7 +821,7 @@ async function requestTranscriptReplacement(method) {
     await saveToCache(request.videoId);
   } catch (error) {
     if (digestRequest !== request) return;
-    transcriptAcquisition = { missing: !currentTranscript, message: "字幕请求失败。请重试。" };
+    transcriptAcquisition = { missing: !currentTranscript, needsBilibiliAccess, message: "字幕请求失败。请重试。" };
   } finally {
     if (digestRequest === request) {
       digestRequest = null;
@@ -993,17 +1095,12 @@ function renderAnalysisResults(analysis) {
     const quoteCopyBtn = div.querySelector(".quote-copy-btn");
     quoteCopyBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(
-          getLocalizedPlainText(quote.quote, "overview", `quote-${index}`),
-        );
-        quoteCopyBtn.textContent = "已复制";
-        setTimeout(() => {
-          quoteCopyBtn.textContent = "复制";
-        }, 1500);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
+      const text = getLocalizedPlainText(quote.quote, "overview", `quote-${index}`);
+      if (!await copyToClipboard(text)) return;
+      quoteCopyBtn.textContent = "已复制";
+      setTimeout(() => {
+        quoteCopyBtn.textContent = "复制";
+      }, 1500);
     });
 
     const quoteSaveNoteBtn = div.querySelector(".quote-save-note-btn");
@@ -1544,6 +1641,9 @@ function renderTranscriptAcquisition(active = panelIsShowingResults() || transcr
   document.getElementById("transcriptSettingsBtn").hidden = !acquisition?.settings;
   document.querySelectorAll("[data-transcript-method]").forEach((button) => {
     button.disabled = Boolean(acquisition?.busy);
+    if (button.dataset.transcriptMethod === "web") {
+      button.textContent = acquisition?.needsBilibiliAccess ? "授权并重试" : "重试读取网页字幕";
+    }
   });
 }
 
@@ -1736,6 +1836,10 @@ async function seekTo(seconds) {
   const request = ++seekRequest;
   const status = document.getElementById("seekStatus");
   status.textContent = "";
+  if (embeddedSafariContext?.readingLayout) {
+    window.parent.postMessage({ action: "seekSafariDigest", videoId: currentVideoId, seconds: target, request }, "*");
+    return;
+  }
   try {
     const result = await relayToVideo({ action: "seekTo", seconds: target });
     if (request !== seekRequest || result?.response?.success) return;
@@ -1753,13 +1857,17 @@ async function seekTo(seconds) {
  *   current player would jump to the wrong content, so we open that video in a
  *   new tab at the right timestamp instead.
  */
-function playNote(note) {
+async function playNote(note) {
   if (note.videoId && note.videoId === currentVideoId) {
-    seekTo(note.timestampSeconds);
-  } else {
-    // The link uses the timestamp format for the source platform.
-    chrome.tabs.create({ url: note.timestampedUrl });
+    return seekTo(note.timestampSeconds);
   }
+  if (!embeddedSafariContext) return chrome.tabs.create({ url: note.timestampedUrl });
+  const result = await chrome.runtime.sendMessage({
+    action: "openSafariVideoAtTimestamp",
+    videoId: note.videoId,
+    seconds: note.timestampSeconds,
+  }).catch(() => null);
+  if (!result?.success) document.getElementById("seekStatus").textContent = "无法打开这条笔记对应的视频。";
 }
 
 // ============================================================
@@ -1790,6 +1898,21 @@ async function copyToClipboard(text) {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (error) {
+    if (embeddedSafariContext) {
+      const field = document.createElement("textarea");
+      field.value = text;
+      field.style.cssText = "position:fixed;inline-size:1px;opacity:0;pointer-events:none";
+      field.readOnly = true;
+      document.body.append(field);
+      field.select();
+      try {
+        if (document.execCommand("copy")) return true;
+      } catch (fallbackError) {
+        debugLog("Safari clipboard fallback failed:", fallbackError);
+      } finally {
+        field.remove();
+      }
+    }
     console.error("Copy failed:", error);
     return false;
   }
@@ -1805,6 +1928,8 @@ async function copyToClipboardWithFeedback(text, buttonId) {
     setTimeout(() => {
       btn.textContent = original;
     }, 2000);
+  } else if (embeddedSafariContext) {
+    document.getElementById("seekStatus").textContent = "复制失败。请长按选择要复制的文字。";
   }
 }
 
@@ -1814,16 +1939,21 @@ function downloadTextFile(text, filename) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  if (embeddedSafariContext) document.body.append(a);
   a.click();
-  URL.revokeObjectURL(url);
+  if (embeddedSafariContext) {
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  } else {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function sanitizeFilename(str) {
-  return (str || "untitled")
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .substring(0, 50)
-    .toLowerCase();
+  const title = (str || "").normalize().toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "-")
+    .replace(/^-+/, "");
+  return [...title].slice(0, 50).join("").replace(/-+$/, "") || "未命名视频";
 }
 
 // ============================================================
@@ -1889,7 +2019,7 @@ function setupExplainFeature() {
 
   // Listen for text selection
   document.addEventListener(
-    "mouseup",
+    embeddedSafariContext ? "selectionchange" : "mouseup",
     () => {
       const selection = window.getSelection();
       const text = selection?.toString().trim() || "";
@@ -1914,13 +2044,23 @@ function setupExplainFeature() {
         const rowSeconds = Number(selectedRow?.dataset.seconds);
         selectedTimestamp = getTranscriptCueTime(startElement, Number.isFinite(rowSeconds) ? rowSeconds : 0);
 
-        // Set the final coordinates while the toolbar is still hidden. If it
-        // becomes visible first, Chrome paints it at its default left edge for
-        // one frame before moving it to the selection center.
         const rect = range.getBoundingClientRect();
-        tooltip.style.top = `${rect.bottom + window.scrollY + 8}px`;
-        tooltip.style.left = `${rect.left + rect.width / 2}px`;
-        tooltip.style.display = "flex";
+        const center = rect.left + rect.width / 2;
+        if (embeddedSafariContext) {
+          tooltip.style.display = "flex";
+          const margin = tooltip.offsetWidth / 2 + 8;
+          const below = rect.bottom + 8;
+          const top = below + tooltip.offsetHeight <= window.innerHeight - 8
+            ? below
+            : Math.max(8, rect.top - tooltip.offsetHeight - 8);
+          tooltip.style.top = `${top}px`;
+          tooltip.style.left = `${Math.min(window.innerWidth - margin, Math.max(margin, center))}px`;
+        } else {
+          // Chrome otherwise paints the toolbar at its default edge for one frame.
+          tooltip.style.top = `${rect.bottom + window.scrollY + 8}px`;
+          tooltip.style.left = `${center}px`;
+          tooltip.style.display = "flex";
+        }
       } else {
         tooltip.style.display = "none";
       }
@@ -2022,6 +2162,7 @@ async function showExplanation(selectedText) {
   `;
 
   document.body.appendChild(modal);
+  const explanationContent = modal.querySelector("#explanationContent");
 
   // Close handlers
   document
@@ -2043,15 +2184,13 @@ async function showExplanation(selectedText) {
       videoTitle: currentVideoTitle,
     });
 
-    const contentDiv = document.getElementById("explanationContent");
     if (result.success) {
-      contentDiv.innerHTML = `<div class="explain-text">${escapeHtml(result.explanation).replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>")}</div>`;
+      explanationContent.innerHTML = `<div class="explain-text">${escapeHtml(result.explanation).replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>")}</div>`;
     } else {
-      contentDiv.innerHTML = `<div class="explain-error">未能获取讲解：${escapeHtml(localizeError(result.error))}</div>`;
+      explanationContent.innerHTML = `<div class="explain-error">未能获取讲解：${escapeHtml(localizeError(result.error))}</div>`;
     }
   } catch (error) {
-    const contentDiv = document.getElementById("explanationContent");
-    contentDiv.innerHTML = `<div class="explain-error">错误：${escapeHtml(localizeError(error.message))}</div>`;
+    explanationContent.innerHTML = `<div class="explain-error">错误：${escapeHtml(localizeError(error.message))}</div>`;
   }
 }
 
@@ -2416,6 +2555,10 @@ function stopPlaybackTracking() {
  * YouTube tab and highlights + scrolls to the matching transcript entry.
  */
 async function playbackTrackingTick() {
+  if (embeddedSafariContext?.readingLayout) {
+    if (Number.isFinite(safariPlaybackPosition)) highlightActiveEntry(safariPlaybackPosition);
+    return;
+  }
   try {
     const videoId = currentVideoId;
     const result = await relayToVideo({ action: "getCurrentTime" });
@@ -3043,4 +3186,5 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   getNavigationUrl,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  sanitizeFilename,
 };

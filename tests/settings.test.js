@@ -17,6 +17,22 @@ test("video identities keep existing YouTube keys and isolate X and Bilibili par
   assert.equal(settings.videoFromUrl("https://x.com/SpaceX/status/123/video/2"), null);
 });
 
+test("Safari mobile video pages can load the panel and share desktop transcript IDs", () => {
+  const manifest = require("../safari/manifest.json");
+  for (const [mobile, desktop] of [
+    ["https://m.youtube.com/watch?v=video123", "https://www.youtube.com/watch?v=video123"],
+    ["https://m.bilibili.com/video/BV1DXKS6rEYq/?p=2", "https://www.bilibili.com/video/BV1DXKS6rEYq/?p=2"],
+  ]) {
+    assert.deepEqual(settings.videoFromUrl(mobile), settings.videoFromUrl(desktop));
+    const pattern = `${new URL(mobile).origin}/*`;
+    assert.ok(manifest.host_permissions.includes(pattern), `Missing site permission for ${pattern}`);
+    assert.ok(manifest.content_scripts.some(({ matches }) => matches.includes(pattern)), `Missing page scripts for ${pattern}`);
+    assert.ok(manifest.web_accessible_resources.some(({ resources, matches }) =>
+      resources.includes("sidepanel.html") && matches.includes(pattern)), `Missing panel access for ${pattern}`);
+  }
+  assert.equal(settings.videoFromUrl("https://m.youtube.com/results?v=video123"), null);
+});
+
 test("DeepSeek defaults use V4 Flash", () => {
   const normalized = settings.normalize({
     provider: "unexpected",

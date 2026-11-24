@@ -1,0 +1,85 @@
+#ytd-safari-digest {
+  color-scheme: light;
+}
+
+#ytd-safari-digest [hidden] {
+  display: none !important;
+}
+
+#ytd-safari-digest .ytd-safari-launcher,
+#ytd-safari-digest .ytd-safari-panel {
+  position: fixed;
+  z-index: 2100;
+  box-sizing: border-box;
+  box-shadow: 0 8px 32px rgb(46 42 36 / 22%);
+}
+
+#ytd-safari-digest .ytd-safari-launcher {
+  inset-inline-end: max(16px, env(safe-area-inset-right));
+  inset-block-end: max(24px, env(safe-area-inset-bottom));
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  padding-inline: 18px;
+  border: 0;
+  border-radius: 999px;
+  background: #934535;
+  color: white;
+  font: 650 15px/1.5 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#ytd-safari-digest .ytd-safari-launcher:focus-visible {
+  outline: 2px solid white;
+  outline-offset: -3px;
+}
+
+#ytd-safari-digest .ytd-safari-playback-status {
+  position: fixed;
+  z-index: 2100;
+  inset-inline-end: max(16px, env(safe-area-inset-right));
+  inset-block-end: calc(max(24px, env(safe-area-inset-bottom)) + 52px);
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 4px 16px rgb(46 42 36 / 22%);
+  color: #382e27;
+  font: 500 14px/1.5 system-ui, sans-serif;
+  pointer-events: none;
+}
+
+#ytd-safari-digest .ytd-safari-panel {
+  inset-inline: max(8px, env(safe-area-inset-left)) max(8px, env(safe-area-inset-right));
+  inset-block-end: max(8px, env(safe-area-inset-bottom));
+  block-size: min(49dvh, 585px);
+  border: 1px solid #e6ddcf;
+  border-radius: 17px;
+  overflow: clip;
+  background: #f7f3ec;
+}
+
+#ytd-safari-digest .ytd-safari-frame {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+}
+
+@media (orientation: landscape) and (min-width: 900px) {
+  #ytd-safari-digest[data-docked] .ytd-safari-panel {
+    inset-inline: auto max(12px, env(safe-area-inset-right));
+    inset-block: max(68px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-bottom));
+    inline-size: var(--ytd-safari-dock);
+    block-size: auto;
+  }
+}
+
+#ytd-safari-digest[data-reading] .ytd-safari-panel {
+  inset: 0;
+  padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
+  padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+  inline-size: auto;
+  block-size: auto;
+  border: 0;
+  border-radius: 0;
+}

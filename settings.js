@@ -77,15 +77,16 @@ var YTD_SETTINGS = (() => {
     try {
       const url = new URL(value);
       if (url.protocol !== "https:") return null;
-      if (url.hostname === "www.youtube.com") {
+      if (url.hostname === "www.youtube.com" ||
+          (url.hostname === "m.youtube.com" && url.pathname === "/watch")) {
         const video = videoFromId(url.searchParams.get("v"));
         return video?.platform === "youtube" ? video : null;
       }
-      if (["x.com", "www.x.com", "twitter.com", "www.twitter.com"].includes(url.hostname)) {
+      if (["x.com", "www.x.com", "m.x.com", "twitter.com", "www.twitter.com"].includes(url.hostname)) {
         const post = /^\/(?:[\w]+|i\/web)\/status\/(\d{1,20})(?:\/video\/1)?\/?$/.exec(url.pathname);
         return post ? videoFromId(`x:${post[1]}`) : null;
       }
-      if (url.hostname === "www.bilibili.com") {
+      if (url.hostname === "www.bilibili.com" || url.hostname === "m.bilibili.com") {
         const path = /^\/video\/(BV[A-Za-z0-9]{10})\/?$/.exec(url.pathname);
         const page = url.searchParams.get("p") || "1";
         return path ? videoFromId(`bili:${path[1]}:${page}`) : null;

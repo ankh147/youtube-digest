@@ -12,10 +12,9 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
-// Prevent the YouTube content script from reading API keys or cached data.
-// Side panel, options, and service-worker contexts remain trusted.
+// Chrome's setAccessLevel keeps keys and cached data out of content scripts.
 chrome.storage.local
-  .setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
+  .setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" })
   .catch((error) =>
     console.warn("[YouTube Digest] Could not restrict storage access:", error),
   );
@@ -223,6 +222,15 @@ async function readBoundedAiResponse(response, onActivity) {
  * Chrome's Side Panel API lets us show a persistent panel alongside the page.
  */
 chrome.action.onClicked.addListener((tab) => {
+  if (!chrome.sidePanel) {
+    if (!YTD_SETTINGS.videoFromUrl(tab.url)) {
+      void chrome.runtime.openOptionsPage();
+      return;
+    }
+    void chrome.tabs.sendMessage(tab.id, { action: "openSafariDigest" }, { frameId: 0 })
+      .catch((error) => debugLog("[YouTube Digest] Safari panel unavailable:", error.message));
+    return;
+  }
   if (!YTD_SETTINGS.supportsPanel(tab.url)) {
     void updatePanelForTab(tab.id, tab.url, tab.windowId);
     return;
@@ -240,10 +248,10 @@ chrome.action.onClicked.addListener((tab) => {
 /**
  * Register the toolbar entry point for supported video pages.
  */
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true });
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {
-  if (reason === "install") chrome.runtime.openOptionsPage();
+  if (chrome.sidePanel && reason === "install") chrome.runtime.openOptionsPage();
 });
 
 /**
@@ -312,6 +320,7 @@ function getNavigationUrl(changeInfo, tab) {
 // A tab started or completed navigation. Reconcile at both stages because
 // Chrome can replace per-tab side-panel options while the page commits.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!chrome.sidePanel) return;
   const url = getNavigationUrl(changeInfo, tab);
   if (!url) return; // Ignore title and favicon-only updates.
   void updatePanelForTab(tabId, url, tab.windowId);
@@ -319,6 +328,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 // The user switched to a different tab (or opened a new one).
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  if (!chrome.sidePanel) return;
   try {
     const tab = await chrome.tabs.get(tabId);
     void updatePanelForTab(tabId, tab.url || tab.pendingUrl, windowId);
@@ -368,6 +378,44 @@ async function sendToVideoPage(tabId, source, payload) {
  * This is like a switchboard — different "actions" trigger different handlers.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "getSafariDigestTab") {
+    const tab = sender.tab;
+    const source = YTD_SETTINGS.videoFromUrl(tab?.url);
+    sendResponse({
+      tabId: !chrome.sidePanel && source && source.id === message.videoId &&
+        (sender.frameId == null || sender.frameId === 0)
+        ? tab.id
+        : null,
+    });
+    return false;
+  }
+  if (message.action === "getSafariPanelVideo") {
+    if (chrome.sidePanel || !Number.isSafeInteger(message.tabId) ||
+        (sender.tab && sender.tab.id !== message.tabId)) {
+      sendResponse(null);
+      return false;
+    }
+    chrome.tabs.get(message.tabId).then((tab) => {
+      const source = YTD_SETTINGS.videoFromUrl(tab.url);
+      sendResponse(source?.id === message.videoId ? {
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+      } : null);
+    }).catch(() => sendResponse(null));
+    return true;
+  }
+  if (message.action === "openSafariVideoAtTimestamp") {
+    const source = YTD_SETTINGS.videoFromId(message.videoId);
+    if (chrome.sidePanel || !source || !Number.isFinite(message.seconds)) {
+      sendResponse({ success: false });
+      return false;
+    }
+    const url = YTD_SETTINGS.timestampUrl(source, message.seconds);
+    chrome.tabs.create({ url }).then(() => sendResponse({ success: true }))
+      .catch(() => sendResponse({ success: false }));
+    return true;
+  }
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
     handleFetchTranscript(message.videoId, message)
@@ -480,7 +528,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // IMPORTANT: we call setOptions + open synchronously (no await between them)
     // to preserve the user gesture context. Chrome requires sidePanel.open()
     // to be called within a user gesture — awaiting anything first can expire it.
-    if (tabId && YTD_SETTINGS.videoFromUrl(sender.tab.url)) {
+    if (chrome.sidePanel && tabId && YTD_SETTINGS.videoFromUrl(sender.tab.url)) {
       chrome.sidePanel.setOptions({
         tabId,
         path: "sidepanel.html",

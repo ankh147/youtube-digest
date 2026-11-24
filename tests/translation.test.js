@@ -89,6 +89,7 @@ function loadBackgroundHelpers({
   scripting,
 } = {}) {
   const listeners = { addListener() {} };
+  let messageListener;
   const localStorage = { ytd_settings: settings };
   const sessionStorage = {};
   const sandbox = {
@@ -130,7 +131,7 @@ function loadBackgroundHelpers({
       sidePanel,
       runtime: {
         onInstalled: listeners,
-        onMessage: listeners,
+        onMessage: { addListener(listener) { messageListener = listener; } },
         openOptionsPage() {},
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
         sendMessage: () => Promise.resolve({ success: true }),
@@ -147,8 +148,35 @@ function loadBackgroundHelpers({
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("background.js"), sandbox);
-  return sandbox.__YTD_TRANSLATION_TESTING__;
+  return {
+    ...sandbox.__YTD_TRANSLATION_TESTING__,
+    dispatchMessage: (message, sender) => new Promise((resolve) => messageListener(message, sender, resolve)),
+  };
 }
+
+test("Safari reads panel tab details in the worker and rejects a different frame tab or video", async () => {
+  const tab = { id: 17, url: "https://x.com/SpaceX/status/1481651037291225113", title: "SpaceX" };
+  const { dispatchMessage } = loadBackgroundHelpers({
+    sidePanel: null,
+    tabs: { get: async (id) => {
+      assert.equal(id, tab.id);
+      return tab;
+    } },
+  });
+  const request = { action: "getSafariPanelVideo", tabId: tab.id, videoId: "x:1481651037291225113" };
+  const result = await dispatchMessage(request, { tab });
+  assert.equal(result.url, tab.url);
+  assert.equal(result.title, tab.title);
+  assert.equal(await dispatchMessage(request, { tab: { id: 31 } }), null);
+  assert.equal(await dispatchMessage({ ...request, videoId: "x:123" }, { tab }), null);
+});
+
+test("transcript export keeps Chinese video titles and removes path separators", () => {
+  const { sanitizeFilename } = loadSidepanelHelpers();
+  assert.equal(sanitizeFilename("开源插件 / YouTube 学习资料"), "开源插件-youtube-学习资料");
+  assert.equal(sanitizeFilename("中文标题"), "中文标题");
+  assert.equal(sanitizeFilename("../?"), "未命名视频");
+});
 
 test("YouTube and X try web subtitles without Supadata and paid modes require an explicit method", async () => {
   const calls = [];

@@ -2,7 +2,7 @@
 
 Effective: November 24, 2026 for this local version
 
-YouTube Digest is a Chrome extension distributed through GitHub. AI features and the optional Supadata fallback use your own API keys. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
+YouTube Digest is a browser extension distributed through GitHub. The Safari version is built and installed locally through Xcode. AI features and the optional Supadata fallback use your own API keys. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
 
 ## Data the extension handles
 
@@ -46,30 +46,31 @@ Those services process data under their own terms, privacy policies, retention p
 
 ## Local storage and retention
 
-YouTube Digest uses Chrome's local extension storage, not a YouTube Digest cloud service.
+YouTube Digest uses each browser's local extension storage. Chrome and Safari store their own data separately.
 
-- Supadata and DeepSeek settings and API keys remain on the device in Chrome's extension storage.
+- Supadata and DeepSeek settings and API keys remain on the device in the browser's extension storage.
 - Saved notes remain until you delete them or remove/clear the extension's data. The extension keeps up to 100 notes.
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
 
-Chrome extension storage is not a password vault. Anyone with sufficient access to your browser profile or device may be able to recover locally stored keys or content. Use scoped keys where providers support them, set spending limits, and rotate or revoke a key if the device or browser profile is compromised.
+Anyone with sufficient access to your browser profile or device may be able to recover locally stored keys or content. Use scoped keys where providers support them, set spending limits, and rotate or revoke a key if the device or browser profile is compromised.
 
 To remove data:
 
 - delete individual saved notes in YouTube Digest;
 - use the Options page to clear cached digests, delete all notes, or reset all extension data;
-- remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries; and
+- remove the extension or clear its stored data from the browser to delete all local settings, keys, notes, and cache entries; and
 - revoke keys in the Supadata or DeepSeek dashboard to stop their future use.
 
 Clearing local data does not delete information already processed or retained by Supadata or DeepSeek. Use each service's controls for service-side requests.
 
 ## Permissions
 
-YouTube Digest uses Chrome permissions for these purposes:
+YouTube Digest uses browser permissions for these purposes:
 
-- `sidePanel`: display the YouTube Digest interface beside supported video pages.
+- `sidePanel` in Chrome: display the YouTube Digest interface beside supported video pages. On Safari the panel opens inside the video page and Safari asks for site access.
+- `clipboardWrite` in Safari: copy subtitle or note text when you choose Copy.
 - `storage`: store settings, keys, notes, and cached results locally.
 - `tabs`: identify and interact with the active video tab.
 - `scripting`: coordinate the extension's YouTube page controls.

@@ -58,6 +58,20 @@ YouTube Digest 是一个通过 GitHub 安装的开源扩展。使用 AI 功能�
 
 这是一个本地加载的扩展，不会自动更新。下载新版或让 Agent 修改代码后，请在 `chrome://extensions` 中找到 YouTube Digest 并点击“重新加载”，然后刷新已经打开的 YouTube 页面。如果移动或删除源代码文件夹，Chrome 中加载的扩展会失效，需要从新的位置重新加载。
 
+## 在 iPhone 或 iPad 的 Safari 安装
+
+Safari 版在 iPhone 和 iPad 上共用一个 Xcode 项目。安装到真机需要一台装有 Xcode 的 Mac 和 Apple 开发签名。在模拟器测试时，在同一个项目里选择 iPhone 或 iPad 模拟器即可。
+
+1. 在项目目录运行 `npm run package:safari`。命令会先运行发布检查，再生成 Xcode 项目。
+2. 打开终端输出的 Xcode 项目。为应用和 Safari 扩展两个目标选择你的签名团队，再选择连接的 iPhone 或 iPad 运行 `YouTube Digest`。
+3. 在设备上打开「设置 → App → Safari → 扩展」，启用 YouTube Digest。在 Safari 打开受支持的视频网页，通过地址栏的扩展菜单允许访问当前网站。
+4. 点击页面上的「摘要」。点面板里的「设置」可以填写 API Key。Safari 的密钥、缓存和笔记保存在 Safari 扩展内，与 Chrome 分开。
+
+iPhone 会用整个 Safari 网页区域显示摘要。点「返回视频」即可切回，点时间戳并成功跳转后也会自动返回播放器。
+
+- 如果 YouTube 手机版没有提供可读取的转写稿，在 Safari 的页面菜单选择「请求桌面网站」，再打开摘要。
+- 如果 Safari 提示需要访问哔哩哔哩的字幕服务，在面板点「授权并重试」。时间戳跳播需要网页播放器。
+
 ## 设置 API Key
 
 读取网页字幕无需 API Key。你可以按需要配置自己的服务账号密钥：
@@ -97,7 +111,7 @@ Model: deepseek-v4-flash
 
 YouTube Digest 会让所有 DeepSeek 请求使用非思考模式，以获得更快、更稳定的交互。设置中的接口地址和模型固定，只需要填写 DeepSeek API Key。如果想使用其他服务或模型，请在设置中复制安全的自定义 prompt，让编程 Agent 修改你自己的本地副本。不要把任何 API Key 放进 prompt 或对话。
 
-API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布包不会包含或使用 `config.js`。
+Chrome 和 Safari 各自把 API Key 和设置保存在本地扩展存储中。发布包不会包含或使用 `config.js`。
 
 ## 使用 YouTube Digest
 
@@ -111,14 +125,14 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 - Chrome 116 或更高版本。
 - YouTube 的 `youtube.com/watch` 播放页直接读取网页转写文稿。
-- X（Twitter）的公开视频帖子直接读取播放器提供的字幕轨。时间戳笔记链接在装有扩展的 Chrome 中跳转。
+- X（Twitter）的公开视频帖子直接读取播放器提供的字幕轨。时间戳笔记链接在装有扩展的浏览器中跳转。
 - 哔哩哔哩的 BV 视频播放页直接读取当前分 P 的字幕轨。部分字幕需要在当前浏览器登录 B 站。无字幕轨或仅有画面内字幕的视频无法读取。
 - 原文、简体中文和双语对照字幕。
 - AI 概览、选中文本讲解、翻译和自动润色笔记。
 - 本地笔记，以及最近字幕、概览和翻译的本地缓存。
 - 发布版本的所有 AI 功能都使用 DeepSeek V4 Flash。其他服务需要修改本地代码，不属于发布版本的支持范围。
 
-Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
+Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。Safari 版面向这三个平台的网页播放器。Firefox 和其他浏览器未纳入支持范围。
 
 扩展先查本地缓存，再读网页字幕。覆盖范围待确认时会在字幕和概览中标明。YouTube 和 X 可手动选择 Supadata 查找现成字幕（`mode=native`）或转录全片（`mode=generate`）。哔哩哔哩直接读取站内字幕轨。
 

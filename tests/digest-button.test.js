@@ -361,10 +361,105 @@ test("X finds the opened post by its timestamp link and controls its video, not 
   assert.equal(reply.querySelector("video").currentTime, 0);
 });
 
+test("X on iPad identifies the main article by its mobile post links", async () => {
+  const postId = "1481651037291225113";
+  const { context } = createHarness(`https://x.com/SpaceX/status/${postId}`);
+  const mainVideo = { currentTime: 0, duration: 20, paused: false };
+  const replyVideo = { currentTime: 0, duration: 15, paused: false };
+  const mobileArticle = (owner, id, video) => ({
+    querySelectorAll: () => [{
+      href: `https://m.x.com/${owner}/status/${id}?launch_app_store=true&ct=engagement_view_post`,
+    }],
+    querySelector: (selector) => selector === "video" ? video : null,
+  });
+  context.document.querySelectorAll = (selector) => selector === "main article" ? [
+    mobileArticle("reply", "1234567890", replyVideo),
+    mobileArticle("SpaceX", postId, mainVideo),
+  ] : [];
+
+  assert.equal((await context.YTD_PLAYER.seekToTimestamp(12)).success, true);
+  assert.equal(mainVideo.currentTime, 12);
+  assert.equal(replyVideo.currentTime, 0);
+});
+
+test("YouTube waits for the transcript button to render after expanding the description", async () => {
+  const { context, flushTimers } = createHarness();
+  let expanded = false;
+  let visible = false;
+  let transcriptOpen = false;
+  let now = 0;
+  context.Date = { now: () => now };
+
+  const expand = { click: () => { expanded = true; } };
+  const collapse = { click: () => { expanded = false; } };
+  const expander = {
+    contains: () => true,
+    hasAttribute: () => expanded,
+    querySelector: (selector) => selector === "#expand" ? expand : collapse,
+  };
+  const button = {
+    getClientRects: () => !expanded || visible ? [{}] : [],
+    click() {
+      assert.ok(visible);
+      transcriptOpen = true;
+    },
+  };
+  const panel = {
+    querySelector: () => ({ click: () => { transcriptOpen = false; } }),
+  };
+  const row = {
+    closest: () => panel,
+    getClientRects: () => [{}],
+    querySelector: (selector) => ({ textContent: selector.includes("Timestamp") ? "0:02" : "Caption" }),
+  };
+  const metadata = {
+    querySelector: (selector) => selector === "ytd-text-inline-expander" ? expander : button,
+  };
+  context.document.querySelector = (selector) => selector === "ytd-watch-metadata" ? metadata : null;
+  context.document.querySelectorAll = (selector) =>
+    transcriptOpen && selector.includes("transcript-segment-view-model") ? [row] : [];
+
+  const result = context.YTD_PLAYER.readNativeTranscript(context.YTD_PLAYER.currentSource(), 10);
+  assert.equal(expanded, true);
+  assert.equal(transcriptOpen, false);
+  visible = true;
+  for (let tick = 0; tick < 3; tick += 1) {
+    now += 200;
+    flushTimers();
+    await Promise.resolve();
+  }
+  const { entries } = await result;
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].start, 2);
+  assert.equal(entries[0].text, "Caption");
+  assert.equal(transcriptOpen, false);
+  assert.equal(expanded, false);
+});
+
+test("YouTube mobile reads available media captions without invoking desktop controls", async () => {
+  const { context } = createHarness("https://m.youtube.com/watch?v=demo123");
+  const track = {
+    kind: "captions", language: "en", mode: "disabled",
+    cues: [{ text: "Caption", startTime: 0, endTime: 8 }],
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === "ytm-slim-video-metadata-section-renderer") return {};
+    return selector === "video.html5-main-video" ? { duration: 8, textTracks: [track] } : null;
+  };
+  context.YTD_SAFARI_PAGE = {
+    waitForYouTubeClick() { assert.fail("The desktop transcript controls are absent on this layout"); },
+  };
+  const result = await context.YTD_PLAYER.readNativeTranscript(context.YTD_PLAYER.currentSource(), 8);
+  assert.equal(result.success, true);
+  assert.equal(result.entries[0].text, "Caption");
+  assert.equal(track.mode, "disabled");
+});
+
 test("YouTube and Bilibili seek the current player and resume paused playback", async () => {
   for (const [url, videoSelector] of [
     ["https://www.youtube.com/watch?v=arj7oStGLkU", "video.html5-main-video"],
-    ["https://www.bilibili.com/video/BV1dnuq6dEak/?p=2", "#bilibili-player video, .bpx-player-video-wrap video"],
+    ["https://www.bilibili.com/video/BV1dnuq6dEak/?p=2", ".bpx-player-video-wrap video"],
+    ["https://m.bilibili.com/video/BV1dnuq6dEak/?p=2", ".m-video-player video"],
   ]) {
     const { context, messageListeners } = createHarness(url);
     const video = {
@@ -373,7 +468,8 @@ test("YouTube and Bilibili seek the current player and resume paused playback", 
       paused: true,
       async play() { this.paused = false; },
     };
-    context.document.querySelector = (selector) => selector === videoSelector ? video : null;
+    const findVideo = (selector) => selector.split(", ").includes(videoSelector) ? video : null;
+    context.document.querySelector = findVideo;
     vm.runInContext(playerScript, context);
     assert.equal(messageListeners.length, 2, "reconnecting must not add a duplicate listener");
     const videoId = context.YTD_PLAYER.currentSource().id;
@@ -396,7 +492,7 @@ test("YouTube and Bilibili seek the current player and resume paused playback", 
 
     if (context.YTD_PLAYER.currentSource().platform === "youtube") {
       context.document.querySelector = (selector) =>
-        selector.includes(".ad-showing") ? {} : selector === videoSelector ? video : null;
+        selector.includes(".ad-showing") ? {} : findVideo(selector);
       const duringAd = await seek(25);
       assert.equal(duringAd.success, false);
       assert.match(duringAd.error, /广告播放结束/);

@@ -1570,3 +1570,149 @@ body {
   color: var(--accent);
   background: var(--accent-dim);
 }
+.safari-embedded .header {
+  padding: 10px 12px 0;
+}
+
+.safari-embedded .header-top {
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.safari-embedded .header-top .video-info {
+  flex-basis: 100%;
+}
+
+.safari-embedded .header-actions {
+  flex: 1 1 100%;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.safari-embedded .header-actions [hidden] {
+  display: none;
+}
+
+.safari-embedded .global-language-control {
+  margin-inline-start: auto;
+}
+
+.safari-embedded .tabs {
+  margin-top: 6px;
+  padding-bottom: 4px;
+}
+
+.safari-embedded .content {
+  min-block-size: 0;
+  padding: 12px;
+  overscroll-behavior: contain;
+}
+
+.safari-embedded .explain-tooltip {
+  position: fixed;
+  inline-size: max-content;
+  white-space: nowrap;
+}
+
+.safari-reading {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+.safari-reading .video-title {
+  margin-bottom: 0;
+  -webkit-line-clamp: 1;
+}
+
+.safari-reading .video-channel,
+.safari-reading .transcript-section-header .section-title {
+  display: none;
+}
+
+.safari-reading [data-panel="transcript"] > .section {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+}
+
+.safari-reading .transcript-section-header {
+  margin: 0;
+}
+
+.safari-reading .transcript-search {
+  margin: 0;
+}
+
+.safari-reading .transcript-search-count:empty,
+.safari-reading .transcript-search-nav:not(:has(button:enabled)) {
+  display: none;
+}
+
+.safari-reading #transcriptList {
+  grid-column: 1 / -1;
+}
+
+.safari-reading .transcript-entry {
+  min-block-size: 44px;
+  padding-block: 7px;
+}
+
+.safari-reading .follow-playback-btn {
+  inset-inline: auto 12px;
+  inset-block-end: 8px;
+  transform: none;
+}
+
+@media (max-width: 560px) {
+  .safari-reading .transcript-search:has(.transcript-search-clear:not([hidden])) {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (min-width: 650px) and (max-height: 500px) {
+  .safari-reading .header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    justify-content: space-between;
+    gap: 0 16px;
+    padding-block: 6px 4px;
+  }
+
+  .safari-reading .header-top {
+    flex: 1;
+    min-inline-size: 0;
+  }
+
+  .safari-reading .header-top .video-info {
+    align-self: center;
+    flex: 1 1 0;
+  }
+
+  .safari-reading .header-actions {
+    flex: 0 0 auto;
+  }
+
+  .safari-reading .tabs {
+    flex: 0 0 25%;
+    margin: 0;
+    padding: 0;
+  }
+
+  .safari-reading .seek-status {
+    flex: 0 0 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  .safari-embedded button {
+    min-block-size: 44px;
+    min-inline-size: 44px;
+  }
+
+  .safari-embedded .transcript-search-input {
+    font-size: 16px;
+  }
+}

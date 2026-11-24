@@ -9,7 +9,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile and are sent only to Supadata and DeepSeek. This open-source extension has no developer server or analytics.",
+        "Keys stay in this browser’s local extension storage and are sent only to Supadata and DeepSeek. This open-source extension has no developer server or analytics.",
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
       supadataApiKeyPlaceholder: "Paste your Supadata key",
@@ -50,7 +50,7 @@ const YTD_OPTIONS = (() => {
       copyCustomizationPrompt: "Copy edited prompt",
       localData: "Local data",
       localDataHelp:
-        "Digests, translations, and notes are stored only in this Chrome profile. You can remove them at any time.",
+        "Digests, translations, and notes are stored only in this browser’s local extension storage. You can remove them at any time.",
       clearCache: "Clear cached digests",
       deleteNotes: "Delete all notes",
       resetData: "Reset extension data",
@@ -70,7 +70,7 @@ const YTD_OPTIONS = (() => {
         `Cleared ${count} cached digest${count === 1 ? "" : "s"}.`,
       notesDeleted: "Deleted all saved notes.",
       resetConfirm:
-        "Delete API keys, cached digests, translations, and saved notes from this Chrome profile?",
+        "Delete API keys, cached digests, translations, and saved notes from this browser’s local extension storage?",
       allDataDeleted: "All YouTube Digest data was deleted.",
       settingsLoadFailed:
         "Could not load saved settings. You can still preview this page.",
@@ -80,7 +80,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "界面语言",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
+        "密钥仅保存在当前浏览器的扩展本地存储中，只会发送给 Supadata 和 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
       supadataApiKeyPlaceholder: "粘贴你的 Supadata 密钥",
@@ -119,7 +119,7 @@ const YTD_OPTIONS = (() => {
       copyCustomizationPrompt: "复制编辑后的提示词",
       localData: "本地数据",
       localDataHelp:
-        "摘要、翻译和笔记仅保存在当前 Chrome 个人资料中。你可以随时删除。",
+        "摘要、翻译和笔记仅保存在当前浏览器的扩展本地存储中。你可以随时删除。",
       clearCache: "清除缓存的摘要",
       deleteNotes: "删除全部笔记",
       resetData: "重置扩展数据",
@@ -137,7 +137,7 @@ const YTD_OPTIONS = (() => {
       clearedDigests: ({ count }) => `已清除 ${count} 条缓存摘要。`,
       notesDeleted: "已删除全部已保存的笔记。",
       resetConfirm:
-        "要从当前 Chrome 个人资料中删除 API 密钥、缓存摘要、翻译和已保存的笔记吗？",
+        "要从当前浏览器的扩展本地存储中删除 API 密钥、缓存摘要、翻译和已保存的笔记吗？",
       allDataDeleted: "已删除全部 YouTube Digest 数据。",
       settingsLoadFailed: "无法加载已保存的设置，但你仍可预览此页面。",
     },
@@ -255,9 +255,9 @@ const YTD_OPTIONS = (() => {
     };
   }
 
-  async function readPreferredLanguage(storage) {
+  async function readPreferredLanguage(storage, defaultLanguage = "en") {
     const stored = await storage.get(LANGUAGE_STORAGE_KEY);
-    return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY]);
+    return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY] ?? defaultLanguage);
   }
 
   async function persistPreferredLanguage(storage, language) {
@@ -344,6 +344,9 @@ const YTD_OPTIONS = (() => {
     const doc = root.document;
     const settingsApi = root.YTD_SETTINGS;
     if (!doc || !settingsApi) return;
+    const isSafari = root.location?.protocol === "safari-web-extension:";
+    const defaultLanguage = isSafari ? "zh-CN" : "en";
+    if (isSafari) doc.querySelector(".customization-card").hidden = true;
 
     const storage = createStorageAdapter(
       root.chrome,
@@ -442,9 +445,9 @@ const YTD_OPTIONS = (() => {
 
     async function loadOptions() {
       try {
-        applyLanguage(await readPreferredLanguage(storage));
+        applyLanguage(await readPreferredLanguage(storage, defaultLanguage));
       } catch (_error) {
-        applyLanguage("en");
+        applyLanguage(defaultLanguage);
       }
       await loadSettings();
     }
