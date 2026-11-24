@@ -63,7 +63,7 @@ function loadSidepanelHelpers({
       windows: { getCurrent: () => Promise.resolve({ id: 1 }) },
       tabs: { onUpdated: listeners, onActivated: listeners },
     },
-    YTD_SETTINGS: {},
+    YTD_SETTINGS: require("../settings.js"),
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("sidepanel.js"), sandbox);
@@ -85,6 +85,8 @@ function loadBackgroundHelpers({
     setPanelBehavior() {},
     setOptions: () => Promise.resolve(),
   },
+  tabs,
+  scripting,
 } = {}) {
   const listeners = { addListener() {} };
   const localStorage = { ytd_settings: settings };
@@ -127,7 +129,8 @@ function loadBackgroundHelpers({
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
         sendMessage: () => Promise.resolve({ success: true }),
       },
-      tabs: { onUpdated: listeners, onActivated: listeners },
+      tabs: { onUpdated: listeners, onActivated: listeners, ...tabs },
+      scripting,
     },
     YTD_SETTINGS: {
       ...require("../settings.js"),
@@ -143,6 +146,7 @@ function loadBackgroundHelpers({
 
 test("transcript requests route by site and only X can opt into speech transcription", async () => {
   const calls = [];
+  const { getTimestampedTranscript } = loadSidepanelHelpers();
   const { handleFetchTranscript } = loadBackgroundHelpers({
     settings: { supadataApiKey: "test-key" },
     fetchImpl: async (url) => {
@@ -156,16 +160,18 @@ test("transcript requests route by site and only X can opt into speech transcrip
     handleFetchTranscript("x:1234567890", { allowXTranscription: true }),
     handleFetchTranscript("x:1234567890", { allowXTranscription: true }),
   ]);
-  assert.equal(x.transcriptTextTimestamped, "[0:09] Speech");
-  assert.equal(repeated.transcriptTextTimestamped, x.transcriptTextTimestamped);
+  assert.equal(getTimestampedTranscript(x), "[0:09] Speech");
+  assert.equal(repeated.transcriptTimestamped, x.transcriptTimestamped);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].searchParams.get("mode"), "auto");
   assert.equal(calls[0].searchParams.get("url"), "https://x.com/i/status/1234567890");
-  await handleFetchTranscript("video123");
+  const youtube = await handleFetchTranscript("video123");
+  assert.equal(getTimestampedTranscript(youtube), "[0:09] Speech");
   assert.equal(calls[1].searchParams.get("mode"), "native");
 });
 
 test("Bilibili uses the requested part and falls back when its first subtitle track is empty", async () => {
+  const { getTimestampedTranscript } = loadSidepanelHelpers();
   const preferred = { lang: "zh-CN", url: "first" };
   const alternate = { lang: "ai-en", url: "second" };
   const { handleFetchTranscript } = loadBackgroundHelpers({
@@ -183,9 +189,86 @@ test("Bilibili uses the requested part and falls back when its first subtitle tr
     },
   });
   const result = await handleFetchTranscript("bili:BV1DXKS6rEYq:2");
-  assert.equal(result.transcriptTextTimestamped, "[1:02] Part two");
+  assert.equal(result.transcriptTimestamped, "[1:02] Part two");
+  assert.equal(getTimestampedTranscript(result), "[1:02] Part two");
   assert.equal(result.language, "en");
   assert.equal(result.videoInfo.title, "Part Two");
+});
+
+test("overview uses cached timestamped text or rebuilds it from cached subtitles", () => {
+  const { getTimestampedTranscript } = loadSidepanelHelpers();
+  const transcript = [{ start: 0.5, text: "开场" }, { start: 62.5, text: "下一段" }];
+  assert.equal(getTimestampedTranscript({ transcript }), "[0:00] 开场\n[1:02] 下一段");
+  assert.equal(getTimestampedTranscript({ transcript, transcriptTimestamped: "[0:00] 已保存" }), "[0:00] 已保存");
+});
+
+test("playback commands reconnect open video tabs once and keep the requested video ID", async () => {
+  const settings = require("../settings.js");
+  for (const url of [
+    "https://www.youtube.com/watch?v=arj7oStGLkU",
+    "https://www.bilibili.com/video/BV1dnuq6dEak/?p=2",
+    "https://x.com/SpaceX/status/1481651037291225113",
+  ]) {
+    const source = settings.videoFromUrl(url);
+    let targetUrl = url;
+    let connected = false;
+    let injections = 0;
+    const delivered = [];
+    const { sendToVideoPage } = loadBackgroundHelpers({
+      tabs: {
+        get: async () => ({ url: targetUrl }),
+        sendMessage: async (tabId, message, { frameId }) => {
+          assert.equal(tabId, 47);
+          assert.equal(frameId, 0);
+          if (!connected) throw new Error("Could not establish connection. Receiving end does not exist.");
+          delivered.push(message);
+          return { success: true };
+        },
+      },
+      scripting: {
+        executeScript: async (request) => {
+          assert.equal(request.target.tabId, 47);
+          assert.equal(request.files.join(","), "settings.js,lib/player.js");
+          injections += 1;
+          connected = true;
+        },
+      },
+    });
+    assert.equal(await sendToVideoPage(47, source, { action: "getCurrentTime" }), null);
+    const seek = { action: "seekTo", seconds: 2.65 };
+    await Promise.all([sendToVideoPage(47, source, { action: "getVideoInfo" }), sendToVideoPage(47, source, seek)]);
+    assert.equal(injections, 1);
+    assert.ok(delivered.every((message) => message.videoId === source.id));
+    assert.equal(delivered.find((message) => message.action === seek.action).seconds, seek.seconds);
+
+    connected = false;
+    targetUrl = "https://example.com";
+    assert.equal((await sendToVideoPage(47, source, seek)).success, false);
+    assert.equal(injections, 1);
+  }
+});
+
+test("overview rejects results with no displayable entries and accepts a partial overview", async () => {
+  const transcriptText = "[0:00] 开场\n[1:02] 下一段";
+  const responses = [
+    { chapters: [{ title: "超出视频范围", timestampSeconds: 145 }], keyQuotes: [] },
+    { chapters: [], keyQuotes: [{ quote: "下一段", timestampSeconds: 62 }] },
+  ];
+  const { handleAnalyzeTranscript } = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/prompts/analysis.md")) return new Response(read("prompts/analysis.md"));
+      assert.ok(JSON.parse(options.body).messages.some(({ content }) => content.includes(transcriptText)));
+      const content = JSON.stringify(responses.shift());
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+    },
+  });
+  const invalid = await handleAnalyzeTranscript(transcriptText, "标题", "作者", "简介", 64);
+  assert.equal(invalid.success, false);
+  assert.equal(invalid.error, "EMPTY_OVERVIEW");
+  const partial = await handleAnalyzeTranscript(transcriptText, "标题", "作者", "简介", 64);
+  assert.equal(partial.success, true);
+  assert.equal(partial.analysis.keyQuotes[0].timestamp, "1:02");
+  assert.equal(partial.analysis.chapters.length, 0);
 });
 
 test("unrelated tabs explicitly close before their panel is disabled", async () => {
@@ -424,20 +507,26 @@ test("Chinese sentence and clause punctuation creates semantic guardrails", () =
   assert.equal(segments[1].text, "这是第二个想法，也应该保持语义完整！");
 });
 
-test("Bilibili original keeps raw cue breaks and timestamps without changing translation groups", () => {
+test("Bilibili groups original cues at sentences, pauses and size limits while keeping exact times", () => {
   const { getOriginalTranscriptRows, groupTranscriptEntries, renderTranscriptSegmentContent } = loadSidepanelHelpers();
   const entries = [
     { start: 308.25, duration: 2, text: "先打开设置页" },
     { start: 310.4, duration: 3, text: "然后填写 API Key" },
-    { start: 313.8, duration: 2, text: "点击保存。" },
+    { start: 313.8, duration: 2.6, text: "点击保存。" },
+    { start: 316.5, duration: 2, text: "开始下一个说明" },
+    { start: 319.7, duration: 10, text: "明显停顿之后" },
+    { start: 329.8, duration: 3, text: "没有标点也会分段" },
+    { start: 333, duration: 2, text: "长".repeat(110) },
   ];
-  assert.deepEqual(getOriginalTranscriptRows(entries, "bili:BV1dnuq6dEak:1"), entries);
+  const rows = getOriginalTranscriptRows(entries, "bili:BV1dnuq6dEak:1");
+  assert.deepEqual(Array.from(rows, ({ start }) => start), [308.25, 316.5, 319.7, 329.8, 333]);
+  assert.deepEqual(Array.from(rows[0].cues, ({ start }) => start), [308.25, 310.4, 313.8]);
+  assert.equal(rows[0].text, "先打开设置页 然后填写 API Key 点击保存。");
+
   const defaultGroups = groupTranscriptEntries(entries);
-  const withBreaks = groupTranscriptEntries(entries, undefined, { preserveCueBreaks: true });
-  assert.equal(withBreaks[0].id, defaultGroups[0].id);
-  assert.equal(withBreaks[0].text, defaultGroups[0].text);
-  assert.equal(withBreaks[0].displayText, entries.map(({ text }) => text).join("\n"));
-  assert.match(renderTranscriptSegmentContent(withBreaks[0], "bilingual", "", ""), /先打开设置页\n然后填写 API Key\n点击保存。/);
+  const withTimestamps = groupTranscriptEntries(entries, undefined, { preserveCueTimestamps: true });
+  assert.deepEqual(Array.from(withTimestamps, ({ id, text }) => [id, text]), Array.from(defaultGroups, ({ id, text }) => [id, text]));
+  assert.match(renderTranscriptSegmentContent(withTimestamps[0], "bilingual", "", ""), /data-cue-start="310\.4">然后填写 API Key<\/span> /);
 });
 
 test("structured translation batches align by stable ID and expose missing fallback", () => {

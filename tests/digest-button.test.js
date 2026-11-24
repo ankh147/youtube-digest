@@ -8,6 +8,7 @@ const contentScript = fs.readFileSync(
   path.resolve(__dirname, "..", "content.js"),
   "utf8",
 );
+const playerScript = fs.readFileSync(path.resolve(__dirname, "..", "lib/player.js"), "utf8");
 
 class FakeElement {
   constructor({
@@ -102,6 +103,7 @@ function createHarness(url = "https://www.youtube.com/watch?v=demo123") {
   const elements = [];
   const documentListeners = {};
   const windowListeners = {};
+  const messageListeners = [];
   const observers = [];
   const timers = new Map();
   let nextTimerId = 1;
@@ -153,7 +155,7 @@ function createHarness(url = "https://www.youtube.com/watch?v=demo123") {
     },
     chrome: {
       runtime: {
-        onMessage: { addListener() {} },
+        onMessage: { addListener: (listener) => messageListeners.push(listener) },
         async sendMessage() {
           return { success: true };
         },
@@ -180,6 +182,7 @@ function createHarness(url = "https://www.youtube.com/watch?v=demo123") {
     clearInterval() {},
   });
 
+  vm.runInContext(playerScript, context);
   vm.runInContext(contentScript, context);
 
   return {
@@ -188,6 +191,7 @@ function createHarness(url = "https://www.youtube.com/watch?v=demo123") {
     fallbackRows,
     elements,
     documentListeners,
+    messageListeners,
     windowListeners,
     observers,
     flushTimers() {
@@ -335,7 +339,7 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(newGroup.children.length, 1);
 });
 
-test("X finds the opened post by its timestamp link and controls its video, not a reply", () => {
+test("X finds the opened post by its timestamp link and controls its video, not a reply", async () => {
   const postUrl = "https://x.com/SpaceX/status/1481651037291225113";
   const { context } = createHarness(postUrl);
   const querySelectorAll = context.document.querySelectorAll;
@@ -352,7 +356,51 @@ test("X finds the opened post by its timestamp link and controls its video, not 
 
   assert.equal(context.injectDigestButton(), true);
   assert.equal(actions.firstChild.id, "ytd-digest-button");
-  assert.equal(context.seekToTimestamp(14), true);
+  assert.equal((await context.YTD_PLAYER.seekToTimestamp(14)).success, true);
   assert.equal(video.currentTime, 14);
   assert.equal(reply.querySelector("video").currentTime, 0);
+});
+
+test("YouTube and Bilibili seek the current player and resume paused playback", async () => {
+  for (const [url, videoSelector] of [
+    ["https://www.youtube.com/watch?v=arj7oStGLkU", "video.html5-main-video"],
+    ["https://www.bilibili.com/video/BV1dnuq6dEak/?p=2", "#bilibili-player video, .bpx-player-video-wrap video"],
+  ]) {
+    const { context, messageListeners } = createHarness(url);
+    const video = {
+      currentTime: 0,
+      duration: 73,
+      paused: true,
+      async play() { this.paused = false; },
+    };
+    context.document.querySelector = (selector) => selector === videoSelector ? video : null;
+    vm.runInContext(playerScript, context);
+    assert.equal(messageListeners.length, 2, "reconnecting must not add a duplicate listener");
+    const videoId = context.YTD_PLAYER.currentSource().id;
+    const seek = (seconds, id = videoId) => new Promise((resolve) => {
+      messageListeners[0]({ action: "seekTo", videoId: id, seconds }, {}, resolve);
+    });
+
+    assert.equal((await seek(62.75)).success, true);
+    assert.equal(video.currentTime, 62.75);
+    assert.equal(video.paused, false);
+    assert.equal((await seek(12, "another-video")).success, false);
+    assert.equal(video.currentTime, 62.75);
+
+    video.paused = true;
+    video.play = async () => { throw new Error("Play blocked"); };
+    const blocked = await seek(10);
+    assert.equal(blocked.success, false);
+    assert.match(blocked.error, /请在网页播放器中点击播放/);
+    assert.equal(video.currentTime, 10);
+
+    if (context.YTD_PLAYER.currentSource().platform === "youtube") {
+      context.document.querySelector = (selector) =>
+        selector.includes(".ad-showing") ? {} : selector === videoSelector ? video : null;
+      const duringAd = await seek(25);
+      assert.equal(duringAd.success, false);
+      assert.match(duringAd.error, /广告播放结束/);
+      assert.equal(video.currentTime, 10);
+    }
+  }
 });

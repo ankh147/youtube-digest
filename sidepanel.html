@@ -67,6 +67,7 @@
         <button class="tab" data-tab="overview">概览</button>
         <button class="tab" data-tab="notes">笔记</button>
       </div>
+      <p id="seekStatus" class="seek-status" role="status"></p>
     </div>
 
     <!-- MAIN CONTENT -->
@@ -191,39 +192,21 @@
 
         <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
         <div class="tab-panel" data-panel="overview">
-          <!-- Chapters -->
-          <div class="section">
-            <div class="section-title">章节</div>
-            <ul class="chapter-list" id="chapterList">
-              <li
-                class="chapter-item"
-                style="
-                  color: var(--text-muted);
-                  cursor: default;
-                  border-color: var(--border);
-                "
-              >
-                章节将显示在这里
-              </li>
-            </ul>
-          </div>
-
-          <!-- Key Quotes -->
-          <div class="section">
-            <div class="section-title">重点引用</div>
-            <div id="quotesList">
-              <div
-                class="quote-item"
-                style="
-                  color: var(--text-muted);
-                  border-left-color: var(--border);
-                  cursor: default;
-                "
-              >
-                <div class="quote-text" style="font-style: normal">
-                  打开此标签页时会提取引用…
-                </div>
-              </div>
+          <p class="overview-message" id="overviewLoading" hidden>正在生成概览…</p>
+          <p class="overview-message" id="overviewError" role="status"></p>
+          <button class="enhance-btn" id="overviewRetry" type="button" hidden>
+            重试生成概览
+          </button>
+          <div id="overviewResults" hidden>
+            <div class="section">
+              <div class="section-title">章节</div>
+              <ul class="chapter-list" id="chapterList"></ul>
+              <p class="overview-message" id="chaptersEmpty" hidden>没有可显示的章节。</p>
+            </div>
+            <div class="section">
+              <div class="section-title">重点引用</div>
+              <div id="quotesList"></div>
+              <p class="overview-message" id="quotesEmpty" hidden>没有可显示的重点引用。</p>
             </div>
           </div>
         </div>

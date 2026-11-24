@@ -322,6 +322,15 @@ body {
   margin-bottom: 28px;
 }
 
+.overview-message {
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+}
+
+.overview-message:empty {
+  margin: 0;
+}
+
 .section-header {
   display: flex;
   align-items: center;
@@ -746,8 +755,34 @@ body {
   font-size: 11px;
   color: var(--accent);
   min-width: 46px;
-  padding-top: 2px;
+  min-height: 24px;
+  align-self: start;
+  padding: 2px 0;
   flex-shrink: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.transcript-time:hover,
+.transcript-cue:hover {
+  text-decoration: underline;
+}
+
+.transcript-time:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.seek-status {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.seek-status:not(:empty) {
+  margin: 8px 0 0;
 }
 
 .transcript-text {

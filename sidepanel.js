@@ -25,7 +25,9 @@ let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
-let isAnalysisLoading = false; // Track if analysis is in progress
+let overviewRequest = null;
+let overviewError = "";
+let seekRequest = 0;
 let videoTabId = null;
 let digestRequest = null;
 let notesRequest = 0;
@@ -121,6 +123,13 @@ const TRANSCRIPT_SEGMENT_LIMITS = Object.freeze({
   maxSeconds: 20,
 });
 
+const BILIBILI_READING_LIMITS = Object.freeze({
+  sentenceSeconds: 8,
+  maxSeconds: 12,
+  pauseSeconds: 1,
+  maxChars: 110,
+});
+
 function normalizeCaptionText(text) {
   return String(text || "")
     .replace(/\s+/g, " ")
@@ -170,7 +179,7 @@ function splitOversizedThought(text, maxChars) {
 function groupTranscriptEntries(
   entries,
   limits = TRANSCRIPT_SEGMENT_LIMITS,
-  { preserveCueBreaks = false } = {},
+  { preserveCueTimestamps = false } = {},
 ) {
   if (!Array.isArray(entries) || entries.length === 0) return [];
 
@@ -199,6 +208,7 @@ function groupTranscriptEntries(
             oversizedParts.length > 1,
           clauseEnd: /[;:,；：，]["')\]”’）】」』]*$/.test(part),
           entryIndex,
+          cueStart: start,
         });
         consumedChars += part.length + 1;
       });
@@ -217,22 +227,23 @@ function groupTranscriptEntries(
       start: current.start,
       text,
       texts: [text],
-      ...(preserveCueBreaks && { displayText: current.cueLines.join("\n") }),
+      ...(preserveCueTimestamps && {
+        cues: current.cues,
+        displayText: current.cues.map(({ text }) => text).join(" "),
+      }),
     });
     current = null;
   };
 
   pieces.forEach((piece) => {
-    if (!current) current = { start: piece.start, text: "", cueLines: [] };
+    if (!current) current = { start: piece.start, text: "", cues: [] };
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
-    if (preserveCueBreaks) {
+    if (preserveCueTimestamps) {
       if (current.lastEntryIndex === piece.entryIndex) {
-        const lastLine = current.cueLines.length - 1;
-        current.cueLines[lastLine] = normalizeCaptionText(
-          `${current.cueLines[lastLine]} ${piece.text}`,
-        );
+        const previousCue = current.cues[current.cues.length - 1];
+        previousCue.text = normalizeCaptionText(`${previousCue.text} ${piece.text}`);
       } else {
-        current.cueLines.push(piece.text);
+        current.cues.push({ start: Math.max(current.start, piece.cueStart), text: piece.text });
         current.lastEntryIndex = piece.entryIndex;
       }
     }
@@ -400,6 +411,10 @@ function setupEventListeners() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });
+  document.getElementById("overviewRetry").addEventListener("click", () => {
+    document.querySelector('.tab[data-tab="overview"]')?.focus();
+    void triggerAnalysis();
+  });
 
   // Error retry
   document.getElementById("errorBtn").addEventListener("click", () => {
@@ -555,7 +570,8 @@ async function startDigest(source, tab, request, allowXTranscription) {
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
-  isAnalysisLoading = false;
+  overviewRequest = null;
+  renderOverviewStatus();
   currentVideoTitle = "";
   currentChannelName = "";
   currentVideoDescription = "";
@@ -614,10 +630,9 @@ async function startDigest(source, tab, request, allowXTranscription) {
   }
 
   if (digest.videoInfo) applyVideoInfo(digest.videoInfo, tab.title);
-  currentAnalysis = digest.analysis || null;
   currentTranscript = digest.transcript;
   currentTranscriptText = digest.transcriptText;
-  currentTranscriptTimestamped = digest.transcriptTimestamped;
+  currentTranscriptTimestamped = getTimestampedTranscript(digest);
   currentTranscriptLanguage = digest.language || digest.transcriptLanguage || null;
   for (const [key, value] of Object.entries(digest.paragraphCache || {})) {
     transcriptParagraphCache.set(key, value);
@@ -626,13 +641,23 @@ async function startDigest(source, tab, request, allowXTranscription) {
     interfaceTranslationCache.set(key, value);
   }
   renderTranscript();
-  if (currentAnalysis) renderAnalysisResults(currentAnalysis);
+  if (hasOverviewContent(digest.analysis)) {
+    currentAnalysis = digest.analysis;
+    renderAnalysisResults(currentAnalysis);
+  } else if (digest.analysis) {
+    renderOverviewStatus({ error: localizeError("EMPTY_OVERVIEW"), canRetry: true });
+  }
   showState("results");
   restorePendingTranscriptViewState(videoId);
   void loadNotes(videoId);
   setupExplainFeature();
   if (currentTranscriptMode !== "original") void translateTranscript();
   if (!cached) await saveToCache(videoId);
+}
+
+function getTimestampedTranscript(digest) {
+  return digest.transcriptTimestamped ||
+    YTD_SETTINGS.formatTimestampedTranscript(digest.transcript);
 }
 
 function applyVideoInfo(info, fallbackTitle) {
@@ -823,10 +848,23 @@ function translateNotesContent() {
  * Renders the analysis results into the Overview tab.
  * Shows chapters and key quotes only.
  */
+function hasOverviewContent(analysis) {
+  return Boolean(analysis?.chapters?.length || analysis?.keyQuotes?.length);
+}
+
+function renderOverviewStatus({ loading = false, error = "", canRetry = false } = {}) {
+  overviewError = error;
+  document.getElementById("overviewLoading").hidden = !loading;
+  document.getElementById("overviewError").textContent = error;
+  document.getElementById("overviewRetry").hidden = !canRetry;
+  document.getElementById("overviewResults").hidden = !currentAnalysis;
+}
+
 function renderAnalysisResults(analysis) {
   // Chapters
   const chapterList = document.getElementById("chapterList");
   chapterList.innerHTML = "";
+  document.getElementById("chaptersEmpty").hidden = Boolean(analysis.chapters?.length);
   (analysis.chapters || []).forEach((chapter, index) => {
     const li = document.createElement("li");
     li.className = "chapter-item";
@@ -855,6 +893,7 @@ function renderAnalysisResults(analysis) {
   const sortedQuotes = [...(analysis.keyQuotes || [])].sort(
     (a, b) => (a.timestampSeconds || 0) - (b.timestampSeconds || 0),
   );
+  document.getElementById("quotesEmpty").hidden = sortedQuotes.length > 0;
   sortedQuotes.forEach((quote, index) => {
     const div = document.createElement("div");
     div.className = "quote-item";
@@ -902,6 +941,8 @@ function renderAnalysisResults(analysis) {
 
     quotesList.appendChild(div);
   });
+
+  renderOverviewStatus();
 
   if (
     currentTranscriptMode !== "original" &&
@@ -987,13 +1028,32 @@ function hasNonCollapsedTextSelection() {
  * Preserves normal row-click seeking while keeping text selection inert.
  */
 function seekFromTranscriptEntryClick(event, seconds) {
-  if (hasNonCollapsedTextSelection()) {
+  if (!event.target.closest(".transcript-time") && hasNonCollapsedTextSelection()) {
     event.preventDefault();
     event.stopPropagation();
     return;
   }
 
-  seekTo(seconds);
+  void seekTo(getTranscriptCueTime(event.target, seconds));
+}
+
+function getTranscriptCueTime(element, fallback) {
+  const seconds = Number(element?.closest("[data-cue-start]")?.dataset.cueStart);
+  return Number.isFinite(seconds) ? seconds : fallback;
+}
+
+function renderTranscriptTimestamp(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.floor(seconds % 60);
+  const timestamp = `${minutes}:${String(remainder).padStart(2, "0")}`;
+  return `<button class="transcript-time" type="button" aria-label="从 ${timestamp} 开始播放">${timestamp}</button>`;
+}
+
+function renderTranscriptSource(segment) {
+  if (!segment.cues) return renderSubtitleInlineMarkup(segment.text);
+  return segment.cues.map(({ start, text }) =>
+    `<span class="transcript-cue" data-cue-start="${start}">${renderSubtitleInlineMarkup(text)}</span>`,
+  ).join(" ");
 }
 
 function renderTranscript() {
@@ -1012,13 +1072,9 @@ function renderTranscript() {
     div.className = "transcript-entry";
     div.dataset.seconds = row.start;
 
-    const minutes = Math.floor(row.start / 60);
-    const seconds = Math.floor(row.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
     div.innerHTML = `
-      <span class="transcript-time">${timestamp}</span>
-      <span class="transcript-text">${renderSubtitleInlineMarkup(row.text)}</span>
+      ${renderTranscriptTimestamp(row.start)}
+      <span class="transcript-text">${renderTranscriptSource(row)}</span>
     `;
 
     div.addEventListener("click", (event) =>
@@ -1037,8 +1093,37 @@ function renderTranscript() {
 function getOriginalTranscriptRows(entries, videoId) {
   if (!videoId?.startsWith("bili:")) return groupTranscriptEntries(entries);
 
-  // Bilibili's cue timing already provides readable breaks for unpunctuated subtitles.
-  return entries.filter((entry) => typeof entry?.text === "string" && entry.text.trim());
+  const rows = [];
+  const limits = BILIBILI_READING_LIMITS;
+  let row;
+  let previous;
+
+  for (const entry of entries) {
+    const text = typeof entry?.text === "string" ? entry.text.trim() : "";
+    const start = Number(entry?.start);
+    if (!text || !Number.isFinite(start) || start < 0) continue;
+
+    const duration = Number(entry.duration);
+    const end = start + (Number.isFinite(duration) && duration > 0 ? duration : 0);
+    if (row) {
+      const followsPause = previous.end > previous.start && start - previous.end >= limits.pauseSeconds;
+      const followsSentence = start - row.start >= limits.sentenceSeconds &&
+        /[.!?。！？]["')\]”’）】」』]*$/.test(previous.text);
+      if (followsPause || followsSentence || end - row.start > limits.maxSeconds ||
+          row.text.length + 1 + text.length > limits.maxChars) {
+        row = null;
+      }
+    }
+
+    if (!row) {
+      row = { start, text: "", cues: [] };
+      rows.push(row);
+    }
+    row.text = row.text ? `${row.text} ${text}` : text;
+    row.cues.push({ start, text });
+    previous = { start, end, text };
+  }
+  return rows;
 }
 
 // ============================================================
@@ -1352,6 +1437,8 @@ function showState(state) {
     state === "results" ? "inline-flex" : "none";
 
   if (state !== "results") {
+    seekRequest += 1;
+    document.getElementById("seekStatus").textContent = "";
     stopPlaybackTracking();
   }
 }
@@ -1383,6 +1470,7 @@ const ERROR_COPY = new Map([
   ["DeepSeek rate-limited this request. Try again shortly.", "此请求受到 DeepSeek 的频率限制。请稍后重试。"],
   ["Rate limited — try again in a moment", "请求频率超限，请稍后重试"],
   ["DeepSeek returned an empty response.", "DeepSeek 返回了空响应。"],
+  ["EMPTY_OVERVIEW", "DeepSeek 没有返回可显示的章节或重点引用。"],
   ["DeepSeek response exceeded the 2 MiB limit.", "DeepSeek 响应超过了 2 MiB 上限。"],
   ["DeepSeek request was inactive for 50 seconds. Please Retry.", "DeepSeek 请求已连续 50 秒无响应。请重试。"],
   ["DeepSeek request exceeded the 120-second limit. Please Retry.", "DeepSeek 请求超过了 120 秒上限。请重试。"],
@@ -1480,8 +1568,8 @@ function switchTab(tabName) {
   // Translate only the visible tab. This prevents hidden surfaces from using
   // tokens or competing with the batch queue the user is waiting for.
   if (tabName === "overview") {
-    if (!currentAnalysis && !isAnalysisLoading) {
-      triggerAnalysis();
+    if (!currentAnalysis && !overviewRequest && !overviewError) {
+      void triggerAnalysis();
     } else if (currentAnalysis && currentTranscriptMode !== "original") {
       void translateOverviewContent();
     }
@@ -1500,26 +1588,18 @@ function switchTab(tabName) {
 }
 
 /**
- * Triggers the LLM analysis (lazy-loaded when user clicks Overview or Quotes tab).
- * This saves tokens by not running analysis until needed.
+ * Generates the overview after the user opens its tab or requests a retry.
  */
 async function triggerAnalysis() {
-  if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
+  if (overviewRequest || currentAnalysis) return;
+  if (!currentTranscriptTimestamped) {
+    renderOverviewStatus({ error: "字幕缺少时间戳，无法生成概览。" });
     return;
+  }
 
-  isAnalysisLoading = true;
-  const analyzedVideoId = currentVideoId;
-
-  // Show loading indicators in the Overview tab
-  const chapterList = document.getElementById("chapterList");
-  const quotesList = document.getElementById("quotesList");
-
-  if (chapterList)
-    chapterList.innerHTML =
-      '<li class="chapter-item" style="color: var(--text-muted); border: none;">正在加载章节…</li>';
-  if (quotesList)
-    quotesList.innerHTML =
-      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">正在加载引用…</div>';
+  const request = { videoId: currentVideoId };
+  overviewRequest = request;
+  renderOverviewStatus({ loading: true });
 
   try {
     const analysisResult = await chrome.runtime.sendMessage({
@@ -1531,11 +1611,10 @@ async function triggerAnalysis() {
       videoDuration: currentVideoDuration,
     });
 
-    if (analyzedVideoId !== currentVideoId) return;
-    if (!analysisResult.success) {
-      if (chapterList)
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">分析失败：${escapeHtml(localizeError(analysisResult.error || "Unknown error"))}</li>`;
-      isAnalysisLoading = false;
+    if (overviewRequest !== request) return;
+    if (!analysisResult?.success || !hasOverviewContent(analysisResult.analysis)) {
+      const error = analysisResult?.message || analysisResult?.error || "EMPTY_OVERVIEW";
+      renderOverviewStatus({ error: localizeError(error), canRetry: true });
       return;
     }
 
@@ -1543,15 +1622,14 @@ async function triggerAnalysis() {
     renderAnalysisResults(currentAnalysis);
 
     // Save to cache now that we have analysis
-    await saveToCache(currentVideoId);
+    await saveToCache(request.videoId);
   } catch (error) {
-    if (analyzedVideoId !== currentVideoId) return;
+    if (overviewRequest !== request) return;
     console.error("[YouTube Digest Panel] Analysis error:", error);
-    if (chapterList)
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">错误：${escapeHtml(localizeError(error.message))}</li>`;
+    renderOverviewStatus({ error: localizeError(error.message), canRetry: true });
+  } finally {
+    if (overviewRequest === request) overviewRequest = null;
   }
-
-  isAnalysisLoading = false;
 }
 
 // ============================================================
@@ -1559,16 +1637,18 @@ async function triggerAnalysis() {
 // ============================================================
 
 async function seekTo(seconds) {
-  debugLog("[YouTube Digest Panel] seekTo called with:", seconds);
-  if (seconds === undefined || seconds === null) {
-    debugLog("[YouTube Digest Panel] seekTo aborted - no seconds value");
-    return;
-  }
-
+  const target = Number(seconds);
+  if (seconds == null || !Number.isFinite(target)) return;
+  const request = ++seekRequest;
+  const status = document.getElementById("seekStatus");
+  status.textContent = "";
   try {
-    await relayToVideo({ action: "seekTo", seconds: Number(seconds) });
+    const result = await relayToVideo({ action: "seekTo", seconds: target });
+    if (request !== seekRequest || result?.response?.success) return;
+    status.textContent = result?.response?.error || result?.error || "无法跳转。请刷新视频页面后重试。";
   } catch (error) {
     console.error("[YouTube Digest Panel] seekTo error:", error);
+    if (request === seekRequest) status.textContent = "无法跳转。请刷新视频页面后重试。";
   }
 }
 
@@ -1738,7 +1818,7 @@ function setupExplainFeature() {
             : range.startContainer.parentElement;
         const selectedRow = startElement?.closest(".transcript-entry");
         const rowSeconds = Number(selectedRow?.dataset.seconds);
-        selectedTimestamp = Number.isFinite(rowSeconds) ? rowSeconds : 0;
+        selectedTimestamp = getTranscriptCueTime(startElement, Number.isFinite(rowSeconds) ? rowSeconds : 0);
 
         // Set the final coordinates while the toolbar is still hidden. If it
         // becomes visible first, Chrome paints it at its default left edge for
@@ -2513,7 +2593,7 @@ async function saveDisplayLanguageMode(videoId, mode) {
 
 function getActiveTranscriptSegments() {
   return groupTranscriptEntries(currentTranscript || [], TRANSCRIPT_SEGMENT_LIMITS, {
-    preserveCueBreaks: currentVideoId?.startsWith("bili:"),
+    preserveCueTimestamps: currentVideoId?.startsWith("bili:"),
   });
 }
 
@@ -2568,7 +2648,7 @@ async function handleDisplayLanguageModeChange(mode) {
 }
 
 function renderTranscriptSegmentContent(segment, mode, translated, error) {
-  const original = renderSubtitleInlineMarkup(segment.displayText ?? segment.text);
+  const original = renderTranscriptSource(segment);
   let translationHtml = "";
   if (translated) {
     translationHtml = renderSubtitleInlineMarkup(translated);
@@ -2604,11 +2684,8 @@ function renderTranscriptModeRows(segments, mode) {
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
-    const minutes = Math.floor(segment.start / 60);
-    const seconds = Math.floor(segment.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
     div.innerHTML = `
-      <span class="transcript-time">${timestamp}</span>
+      ${renderTranscriptTimestamp(segment.start)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
     `;
     div.addEventListener("click", (event) =>
@@ -2860,6 +2937,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   sendTranslationMessage,
   groupTranscriptEntries,
   getOriginalTranscriptRows,
+  getTimestampedTranscript,
   splitOversizedThought,
   alignTranslatedSegmentBatch,
   findLiteralTranscriptMatches,

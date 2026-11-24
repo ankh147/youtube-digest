@@ -1,8 +1,8 @@
 /**
- * Shared, non-secret configuration helpers.
+ * Shared, non-secret configuration and video helpers.
  *
  * API keys are stored in chrome.storage.local by options.js. This file contains
- * defaults and validation only, so it is safe to publish.
+ * defaults and helpers only, so it is safe to publish.
  */
 var YTD_SETTINGS = (() => {
   const STORAGE_KEY = "ytd_settings";
@@ -113,6 +113,14 @@ var YTD_SETTINGS = (() => {
     return url.href;
   }
 
+  function formatTimestampedTranscript(entries = []) {
+    return entries.map(({ start, text }) => {
+      const seconds = Math.floor(start);
+      const timestamp = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+      return `[${timestamp}] ${text}`;
+    }).join("\n");
+  }
+
   return {
     STORAGE_KEY,
     DEFAULTS,
@@ -125,6 +133,7 @@ var YTD_SETTINGS = (() => {
     videoFromUrl,
     supportsPanel,
     timestampUrl,
+    formatTimestampedTranscript,
   };
 })();
 

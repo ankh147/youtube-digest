@@ -31,6 +31,7 @@ public_allowlist=(
   "lib/wbi.js"
   "lib/bili-api.js"
   "lib/bilibili-digest-LICENSE"
+  "lib/player.js"
   "content.js"
   "sidepanel.html"
   "sidepanel.css"

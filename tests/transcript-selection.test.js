@@ -15,7 +15,7 @@ test("all timestamped transcript row clicks use the selection-aware seek helper"
   );
   assert.match(
     source,
-    /function seekFromTranscriptEntryClick\(event, seconds\)[\s\S]*?if \(hasNonCollapsedTextSelection\(\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?seekTo\(seconds\);/,
+    /function seekFromTranscriptEntryClick\(event, seconds\)[\s\S]*?if \(!event\.target\.closest\("\.transcript-time"\) && hasNonCollapsedTextSelection\(\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?seekTo\(getTranscriptCueTime\(event\.target, seconds\)\);/,
   );
 
   const guardedRowHandlers = source.match(

@@ -1,4 +1,5 @@
-// Site integration for the shared sidebar, player controls and note button.
+// Site integration for the shared sidebar and note button.
+const { currentSource, findPostArticle, findPostPlayer, findVideo, extractVideoInfo, seekToTimestamp } = YTD_PLAYER;
 
 const DEBUG = false;
 const debugLog = (...args) => {
@@ -17,33 +18,6 @@ let ytdDigestButton = null;
 let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
 let digestButtonResizeListenerAdded = false;
-
-function currentSource() {
-  return YTD_SETTINGS.videoFromUrl(window.location.href);
-}
-
-function findPostArticle(source) {
-  return Array.from(document.querySelectorAll('main article[data-testid="tweet"]')).find(
-    (article) => Array.from(article.querySelectorAll('a[href*="/status/"]')).some(
-      (link) => YTD_SETTINGS.videoFromUrl(link.href)?.id === source.id,
-    ),
-  );
-}
-
-function findPostPlayer(article) {
-  return article?.querySelector('[data-testid="videoPlayer"], [data-testid="videoComponent"]') || null;
-}
-
-function findVideo(source = currentSource()) {
-  if (!source) return null;
-  if (source.platform === "youtube") return document.querySelector("video.html5-main-video");
-  if (source.platform === "bilibili") {
-    return document.querySelector("#bilibili-player video, .bpx-player-video-wrap video");
-  }
-  const article = findPostArticle(source);
-  if (!article) return null;
-  return article.querySelector("video");
-}
 
 function playerContainerFor(source) {
   if (source?.platform === "youtube") {
@@ -172,53 +146,15 @@ if (document.readyState === "loading") {
  * When they ask for video info, we read it from the page.
  * When they send key moments, we highlight them on the progress bar.
  */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!["highlightMoments", "showNoteSavedFeedback"].includes(message.action)) return false;
   if (message.videoId && currentSource()?.id !== message.videoId) {
     sendResponse({ success: false, error: "视频页面已切换。" });
     return false;
   }
 
-  if (message.action === "getVideoInfo") {
-    // Read video title and channel name from the page
-    const info = extractVideoInfo();
-    debugLog("[YouTube Digest Content] Returning video info:", info);
-    sendResponse(info);
-    return false; // Synchronous response
-  }
-
-  if (message.action === "highlightMoments") {
-    // Key moment markers disabled — chapters are shown in the side panel only.
-    sendResponse({ success: true });
-    return false;
-  }
-
-  if (message.action === "getCurrentTime") {
-    // Return the current video playback time (used by auto-scroll)
-    const video = findVideo();
-    sendResponse({
-      currentTime: video?.currentTime ?? 0,
-      paused: video ? video.paused : true,
-    });
-    return false;
-  }
-
-  if (message.action === "seekTo") {
-    // Jump the video to a specific timestamp
-    debugLog("[YouTube Digest Content] Seeking to:", message.seconds);
-    sendResponse({ success: seekToTimestamp(message.seconds) });
-    return false;
-  }
-
-  if (message.action === "showNoteSavedFeedback") {
-    // Show brief feedback that note was saved
-    showNoteSavedToast(message.note);
-    sendResponse({ success: true });
-    return false;
-  }
-
-  // Unknown action - still send a response to prevent hanging
-  debugLog("[YouTube Digest Content] Unknown action:", message.action);
-  sendResponse({ success: false, error: "Unknown action" });
+  if (message.action === "showNoteSavedFeedback") showNoteSavedToast(message.note);
+  sendResponse({ success: true });
   return false;
 });
 
@@ -753,64 +689,6 @@ function showNoteSavedToast(note) {
 }
 
 // ============================================================
-// VIDEO INFO EXTRACTION
-// ============================================================
-
-/**
- * Reads the video title, channel name, and description directly from YouTube's page.
- * These are just sitting in the HTML — we grab them from the DOM elements.
- */
-function extractVideoInfo() {
-  const source = currentSource();
-  const player = findVideo(source);
-  const duration = Number.isFinite(player?.duration) ? player.duration : 0;
-  if (source?.platform === "x") {
-    const article = findPostArticle(source);
-    const description = article?.querySelector('[data-testid="tweetText"]')?.textContent?.trim() || "";
-    return {
-      title: description.slice(0, 150) || document.title,
-      channelName: article?.querySelector('[data-testid="User-Name"]')?.innerText?.split("\n")[0] || "",
-      description,
-      duration,
-      hasVideo: Boolean(player || findPostPlayer(article)),
-    };
-  }
-  if (source?.platform === "bilibili") {
-    return {
-      title: document.querySelector("h1.video-title, .video-title")?.textContent?.trim() || document.title,
-      channelName: document.querySelector(".up-info-container .up-name, a.up-name")?.textContent?.trim() || "",
-      description: document.querySelector("#v_desc, .basic-desc-info")?.textContent?.trim() || "",
-      duration,
-    };
-  }
-
-  // The video title is in an h1 element inside the #title container
-  const titleElement = document.querySelector(
-    "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
-  );
-
-  // The channel name is in the channel info section
-  const channelElement = document.querySelector(
-    "#channel-name yt-formatted-string a, ytd-channel-name yt-formatted-string a",
-  );
-
-  // Video description — YouTube has this in a few possible places
-  const descriptionElement = document.querySelector(
-    "#description-inner, " +
-      "ytd-watch-metadata #description yt-attributed-string, " +
-      "#description yt-formatted-string, " +
-      "ytd-expander#description yt-attributed-string",
-  );
-
-  return {
-    title: titleElement?.textContent?.trim() || "",
-    channelName: channelElement?.textContent?.trim() || "",
-    duration,
-    description: descriptionElement?.textContent?.trim() || "",
-  };
-}
-
-// ============================================================
 // PROGRESS BAR KEY MOMENTS
 // ============================================================
 
@@ -830,25 +708,6 @@ function extractVideoInfo() {
 function highlightKeyMoments(moments, videoDuration) {
   // Disabled: no timeline markers. Chapters live only in the side panel.
   return;
-}
-
-// ============================================================
-// SEEK TO TIMESTAMP
-// ============================================================
-
-/**
- * Jumps the YouTube video to a specific timestamp (in seconds).
- * This is called when the user clicks a timestamp in the side panel.
- *
- * We simply set the video element's .currentTime property,
- * which is the standard HTML5 way to seek in a video.
- */
-function seekToTimestamp(seconds, play = true) {
-  const video = findVideo();
-  if (!video || !Number.isFinite(seconds) || seconds < 0) return false;
-  video.currentTime = Number.isFinite(video.duration) ? Math.min(seconds, video.duration) : seconds;
-  if (play && video.paused) video.play().catch(() => {});
-  return true;
 }
 
 function escapeHtmlForContent(text) {

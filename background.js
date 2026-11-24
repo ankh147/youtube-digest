@@ -340,6 +340,38 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   }
 });
 
+const videoConnections = new Map();
+
+async function sendToVideoPage(tabId, source, payload) {
+  const message = { ...payload, videoId: source.id };
+  const send = () => chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+  try {
+    return await send();
+  } catch (error) {
+    if (!error.message?.includes("Receiving end does not exist")) throw error;
+    if (payload.action === "getCurrentTime") return null;
+  }
+
+  // Chrome leaves tabs open when the extension reloads or updates. Restore the
+  // page connection once, even if several panel requests arrive together.
+  if (!videoConnections.has(tabId)) {
+    const connection = (async () => {
+      const tab = await chrome.tabs.get(tabId);
+      if (YTD_SETTINGS.videoFromUrl(tab.url)?.id !== source.id) return false;
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["settings.js", "lib/player.js"],
+      });
+      return true;
+    })().finally(() => videoConnections.delete(tabId));
+    videoConnections.set(tabId, connection);
+  }
+  if (!await videoConnections.get(tabId)) {
+    return { success: false, error: "视频页面已切换。" };
+  }
+  return send();
+}
+
 // ============================================================
 // MESSAGE HANDLING
 // ============================================================
@@ -497,10 +529,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        const response = await chrome.tabs.sendMessage(tab.id, {
-          ...message.payload,
-          videoId: source.id,
-        });
+        const response = await sendToVideoPage(tab.id, source, message.payload);
         if (message.payload.action === "getVideoInfo" && source.platform === "youtube") {
           // Prefer the player's metadata to the playlist or collapsed DOM text.
           const playerInfo = await getPlayerVideoDetails(tab.id);
@@ -520,7 +549,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, response });
       } catch (err) {
         console.error("[YouTube Digest BG] Relay error:", err.message);
-        sendResponse({ success: false, error: err.message });
+        sendResponse({ success: false, error: "无法连接播放器。请刷新视频页面后重试。" });
       }
     })();
     return true; // Keep channel open for async response
@@ -753,11 +782,7 @@ function buildTranscript(entries, language, emptyMessage) {
     success: true,
     transcript: entries,
     transcriptText: entries.map(({ text }) => text).join(" "),
-    transcriptTextTimestamped: entries.map(({ start, text }) => {
-      const seconds = Math.floor(start);
-      const timestamp = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-      return `[${timestamp}] ${text}`;
-    }).join("\n"),
+    transcriptTimestamped: YTD_SETTINGS.formatTimestampedTranscript(entries),
     language,
   };
 }
@@ -937,15 +962,18 @@ async function handleAnalyzeTranscript(
     });
 
     // Parse the JSON, tolerating trailing commas / stray prose
-    let analysis = parseLooseJson(responseText);
+    const parsedAnalysis = parseLooseJson(responseText);
 
     // Treat every model response as untrusted data. Rebuild the supported
     // schema and derive display timestamps from validated numeric seconds.
-    analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
+    const analysis = validateAndFixTimestamps(parsedAnalysis, maxTimestampSeconds);
+    if (!analysis.chapters.length && !analysis.keyQuotes.length) {
+      return { success: false, error: "EMPTY_OVERVIEW" };
+    }
 
     return {
       success: true,
-      analysis: analysis,
+      analysis,
     };
   } catch (error) {
     console.error("Analysis error:", error);
@@ -1666,9 +1694,11 @@ async function callAiTranslation(
   }
 }
 
-// Pure validators are exposed for the repository's Node tests only.
+// Helpers exposed for the repository's Node tests only.
 globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleFetchTranscript,
+  handleAnalyzeTranscript,
+  sendToVideoPage,
   requestAiCompletion,
   callAiTranslation,
   validateTranscriptBatchRequest,
