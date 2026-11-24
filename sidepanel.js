@@ -21,6 +21,8 @@ let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
 let currentTranscriptLanguage = null;
+let currentTranscriptCoverage = null;
+let transcriptAcquisition = null;
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
@@ -31,7 +33,6 @@ let seekRequest = 0;
 let videoTabId = null;
 let digestRequest = null;
 let notesRequest = 0;
-let errorAction = null;
 
 // --- Translation state ---
 // The universal language control supports original content, Chinese, and an
@@ -418,15 +419,14 @@ function setupEventListeners() {
 
   // Error retry
   document.getElementById("errorBtn").addEventListener("click", () => {
-    if (errorAction) {
-      errorAction();
-      return;
-    }
     void checkCurrentTab();
   });
 
-  document.getElementById("xTranscriptBtn").addEventListener("click", () => {
-    void checkCurrentTab({ approvedVideoId: currentVideoId });
+  document.querySelectorAll("[data-transcript-method]").forEach((button) => {
+    button.addEventListener("click", () => void requestTranscriptReplacement(button.dataset.transcriptMethod));
+  });
+  document.getElementById("transcriptSettingsBtn").addEventListener("click", () => {
+    void chrome.runtime.sendMessage({ action: "openOptions" });
   });
 
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
@@ -495,7 +495,7 @@ function relayToVideo(payload, tabId = videoTabId, videoId = currentVideoId) {
   return chrome.runtime.sendMessage({ action: "relayToContent", tabId, videoId, payload });
 }
 
-async function checkCurrentTab({ expectedTabId, approvedVideoId } = {}) {
+async function checkCurrentTab({ expectedTabId } = {}) {
   let request;
   try {
     const query = panelWindowId === null
@@ -520,7 +520,7 @@ async function checkCurrentTab({ expectedTabId, approvedVideoId } = {}) {
 
     request = { videoId: source.id, tabId: tab.id };
     digestRequest = request;
-    await startDigest(source, tab, request, approvedVideoId === source.id);
+    await startDigest(source, tab, request);
   } catch (error) {
     console.error("Video check error:", error);
     if (request && digestRequest === request) {
@@ -535,7 +535,7 @@ async function checkCurrentTab({ expectedTabId, approvedVideoId } = {}) {
 // DIGEST PIPELINE
 // ============================================================
 
-async function startDigest(source, tab, request, allowXTranscription) {
+async function startDigest(source, tab, request) {
   const videoId = source.id;
   const videoChanged = videoId !== currentVideoId;
   const isCurrent = () => digestRequest === request;
@@ -570,6 +570,9 @@ async function startDigest(source, tab, request, allowXTranscription) {
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
+  currentTranscriptCoverage = null;
+  transcriptAcquisition = null;
+  document.getElementById("supadataChoices").open = false;
   overviewRequest = null;
   renderOverviewStatus();
   currentVideoTitle = "";
@@ -578,13 +581,12 @@ async function startDigest(source, tab, request, allowXTranscription) {
   currentVideoDuration = 0;
   document.getElementById("videoInfo").style.display = "none";
   showState("loading");
-  updateLoading("正在获取字幕", "");
+  updateLoading("正在查找字幕", "");
 
-  const [viewState, displayMode, cached, config, videoResult] = await Promise.all([
+  const [viewState, displayMode, cached, videoResult] = await Promise.all([
     loadTranscriptViewState(videoId),
     loadDisplayLanguageMode(videoId),
     loadFromCache(videoId),
-    chrome.runtime.sendMessage({ action: "checkConfig" }),
     relayToVideo({ action: "getVideoInfo" }, tab.id, videoId).catch(() => null),
   ]);
   if (!isCurrent()) return;
@@ -594,42 +596,55 @@ async function startDigest(source, tab, request, allowXTranscription) {
   document.getElementById("contentArea")?.classList.toggle(
     "restoring-transcript-view", Boolean(viewState),
   );
-  applyVideoInfo(videoResult?.response || cached?.videoInfo, tab.title);
-
-  if (source.platform !== "bilibili" && (!config?.hasSupadataKey || !config?.hasAiKey)) {
-    showConfigError(config || {});
-    return;
-  }
+  const videoInfo = videoResult?.success ? videoResult.response : null;
+  applyVideoInfo({
+    ...cached?.videoInfo,
+    ...videoInfo,
+    duration: videoInfo?.duration || cached?.videoInfo?.duration,
+  }, tab.title);
 
   let digest = cached;
   if (!digest) {
-    if (source.platform === "x") {
-      if (!videoResult?.response?.hasVideo) {
-        showError("未找到帖子视频", "请等这条帖子的播放器加载后重试，或打开另一条带视频的公开帖子。");
-        return;
-      }
-      if (!allowXTranscription) {
-        showState("xConsent");
-        return;
-      }
-      updateLoading("正在获取字幕", "如果需要从语音生成字幕，可能要等一会儿。");
-    }
-    const result = await chrome.runtime.sendMessage({
-      action: "fetchTranscript", videoId, allowXTranscription,
-    });
+    updateLoading("正在读取网页字幕", "");
+    const result = await fetchTranscriptForVideo(request, "web");
     if (!isCurrent()) return;
     if (!result?.success) {
-      if (result?.error === "NO_SUPADATA_KEY") {
-        showConfigError({ hasSupadataKey: false, hasAiKey: true });
-      } else {
-        showError("未找到字幕", localizeError(result?.message || result?.error || "Unknown error"));
-      }
+      transcriptAcquisition = {
+        missing: true,
+        message: localizeError(result?.message || result?.error || "没有读到网页字幕。"),
+      };
+      showState("transcriptFallback");
       return;
     }
     digest = result;
   }
 
-  if (digest.videoInfo) applyVideoInfo(digest.videoInfo, tab.title);
+  displayDigest(digest);
+  if (!cached) await saveToCache(videoId);
+}
+
+function fetchTranscriptForVideo(request, method) {
+  return chrome.runtime.sendMessage({
+    action: "fetchTranscript", videoId: request.videoId, tabId: request.tabId,
+    method, duration: currentVideoDuration,
+  });
+}
+
+function coverageForDigest(digest) {
+  const duration = digest.videoInfo?.duration || currentVideoDuration || digest.videoDuration ||
+    digest.transcriptCoverage?.duration;
+  return YTD_SETTINGS.transcriptCoverage(digest.transcript, duration);
+}
+
+function displayDigest(digest) {
+  if (digest.videoInfo) applyVideoInfo(digest.videoInfo, currentVideoTitle);
+  if (!currentVideoDuration && digest.videoDuration > 0) currentVideoDuration = digest.videoDuration;
+  currentTranscriptCoverage = coverageForDigest(digest);
+  transcriptAcquisition = null;
+  const overviewCoverage = document.getElementById("overviewCoverage");
+  const warning = describeTranscriptCoverage(currentTranscriptCoverage);
+  overviewCoverage.hidden = !warning;
+  overviewCoverage.textContent = warning ? "概览仅基于已取得的字幕。" + warning : "";
   currentTranscript = digest.transcript;
   currentTranscriptText = digest.transcriptText;
   currentTranscriptTimestamped = getTimestampedTranscript(digest);
@@ -648,11 +663,69 @@ async function startDigest(source, tab, request, allowXTranscription) {
     renderOverviewStatus({ error: localizeError("EMPTY_OVERVIEW"), canRetry: true });
   }
   showState("results");
-  restorePendingTranscriptViewState(videoId);
-  void loadNotes(videoId);
+  restorePendingTranscriptViewState(currentVideoId);
+  void loadNotes(currentVideoId);
   setupExplainFeature();
   if (currentTranscriptMode !== "original") void translateTranscript();
-  if (!cached) await saveToCache(videoId);
+}
+
+async function requestTranscriptReplacement(method) {
+  if (!currentVideoId || digestRequest) return;
+  const request = { videoId: currentVideoId, tabId: videoTabId };
+  digestRequest = request;
+  transcriptAcquisition = {
+    missing: !currentTranscript,
+    busy: true,
+    message: method === "web" ? "正在重新读取网页字幕…" : "正在等待 Supadata 返回字幕…",
+  };
+  renderTranscriptAcquisition();
+
+  try {
+    const result = await fetchTranscriptForVideo(request, method);
+    if (digestRequest !== request) return;
+    if (!result?.success) {
+      transcriptAcquisition = {
+        missing: !currentTranscript,
+        settings: ["NO_SUPADATA_KEY", "INVALID_SUPADATA_KEY"].includes(result?.error),
+        message: localizeError(result?.message || result?.error || "没有取到字幕。"),
+      };
+      return;
+    }
+
+    const coverage = coverageForDigest(result);
+    if (currentTranscriptCoverage && coverage.status !== "covered" &&
+        YTD_SETTINGS.transcriptCoverageLength(coverage) <=
+          YTD_SETTINGS.transcriptCoverageLength(currentTranscriptCoverage)) {
+      transcriptAcquisition = { message: "这次取到的字幕范围没有扩大，已保留原有字幕。" };
+      return;
+    }
+
+    overviewRequest = null;
+    currentAnalysis = null;
+    translationGeneration += 1;
+    transcriptScrollObserver?.disconnect();
+    transcriptScrollObserver = null;
+    for (const cache of [transcriptParagraphCache, interfaceTranslationCache]) {
+      for (const key of cache.keys()) {
+        if (key.startsWith(request.videoId + ":")) cache.delete(key);
+      }
+    }
+    interfaceTranslationFailures.clear();
+    interfaceTranslationInFlight.clear();
+    renderOverviewStatus();
+    displayDigest(result);
+    document.getElementById("supadataChoices").open = false;
+    document.querySelector('.tab[data-tab="transcript"]')?.focus();
+    await saveToCache(request.videoId);
+  } catch (error) {
+    if (digestRequest !== request) return;
+    transcriptAcquisition = { missing: !currentTranscript, message: "字幕请求失败。请重试。" };
+  } finally {
+    if (digestRequest === request) {
+      digestRequest = null;
+      renderTranscriptAcquisition();
+    }
+  }
 }
 
 function getTimestampedTranscript(digest) {
@@ -1416,14 +1489,10 @@ function exportTranscript() {
 function showState(state) {
   document.getElementById("welcomeState").style.display =
     state === "welcome" ? "flex" : "none";
-  document.getElementById("xConsentState").style.display =
-    state === "xConsent" ? "flex" : "none";
   document.getElementById("loadingState").style.display =
     state === "loading" ? "block" : "none";
   document.getElementById("errorState").style.display =
     state === "error" ? "block" : "none";
-  const uploadEl = document.getElementById("uploadState");
-  if (uploadEl) uploadEl.style.display = "none"; // Upload state removed — always hidden
   document.getElementById("resultsState").style.display =
     state === "results" ? "block" : "none";
 
@@ -1436,11 +1505,46 @@ function showState(state) {
   document.getElementById("transcriptModeControl").style.display =
     state === "results" ? "inline-flex" : "none";
 
+  renderTranscriptAcquisition(state === "results" || state === "transcriptFallback");
   if (state !== "results") {
     seekRequest += 1;
     document.getElementById("seekStatus").textContent = "";
     stopPlaybackTracking();
   }
+}
+
+function formatCoverageTime(seconds) {
+  const total = Math.floor(seconds);
+  const minutes = Math.floor(total / 60);
+  const remainder = String(total % 60).padStart(2, "0");
+  if (minutes < 60) return minutes + ":" + remainder;
+  return Math.floor(minutes / 60) + ":" + String(minutes % 60).padStart(2, "0") + ":" + remainder;
+}
+
+function describeTranscriptCoverage(coverage) {
+  if (!coverage || !["partial", "unknown"].includes(coverage.status)) return "";
+  const range = formatCoverageTime(coverage.start) + "–" + formatCoverageTime(coverage.end);
+  const end = coverage.duration ? "，视频全长 " + formatCoverageTime(coverage.duration) : "";
+  const gap = coverage.gaps[0];
+  const gapText = gap
+    ? " " + formatCoverageTime(gap.start) + "–" + formatCoverageTime(gap.end) + " 未检测到字幕，可能没有对白。"
+    : "";
+  return "已取得字幕 " + range + end + "。全片字幕覆盖待确认。" + gapText;
+}
+
+function renderTranscriptAcquisition(active = panelIsShowingResults() || transcriptAcquisition?.missing) {
+  const warning = describeTranscriptCoverage(currentTranscriptCoverage);
+  const acquisition = transcriptAcquisition;
+  const section = document.getElementById("transcriptAcquisition");
+  section.hidden = !active || (currentTranscript && !resultTabIsActive("transcript")) ||
+    !(warning || acquisition?.message);
+  document.getElementById("transcriptCoverageStatus").textContent = section.hidden ? "" : warning;
+  document.getElementById("transcriptRequestStatus").textContent = section.hidden ? "" : acquisition?.message || "";
+  document.getElementById("supadataChoices").hidden = currentVideoId?.startsWith("bili:");
+  document.getElementById("transcriptSettingsBtn").hidden = !acquisition?.settings;
+  document.querySelectorAll("[data-transcript-method]").forEach((button) => {
+    button.disabled = Boolean(acquisition?.busy);
+  });
 }
 
 function updateLoading(title, subtitle) {
@@ -1498,24 +1602,10 @@ function localizeError(message) {
 }
 
 function showError(title, message) {
-  errorAction = null;
   showState("error");
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
   document.getElementById("errorBtn").textContent = "重试";
-}
-
-function showConfigError(configStatus) {
-  const missingKeys = [];
-  if (!configStatus.hasSupadataKey) missingKeys.push("Supadata");
-  if (!configStatus.hasAiKey) missingKeys.push("AI 服务");
-
-  showState("error");
-  document.getElementById("errorTitle").textContent = "缺少 API 密钥";
-  document.getElementById("errorMessage").textContent =
-    `请在 YouTube Digest 设置中添加你的 ${missingKeys.join(" 和 ")} API 密钥。`;
-  document.getElementById("errorBtn").textContent = "打开设置";
-  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
 // ============================================================
@@ -1537,6 +1627,8 @@ function switchTab(tabName) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
+
+  renderTranscriptAcquisition();
 
   // Start/stop playback tracking based on which tab is active
   if (tabName === "transcript") {
@@ -1608,7 +1700,9 @@ async function triggerAnalysis() {
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
       videoDescription: currentVideoDescription,
-      videoDuration: currentVideoDuration,
+      videoDuration: currentTranscriptCoverage?.status === "covered"
+        ? currentVideoDuration : Number(currentTranscriptCoverage?.end) || 0,
+      partialTranscript: currentTranscriptCoverage?.status !== "covered",
     });
 
     if (overviewRequest !== request) return;
@@ -2011,6 +2105,7 @@ async function saveToCache(videoId) {
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
+      transcriptCoverage: currentTranscriptCoverage,
       videoInfo: {
         title: currentVideoTitle, channelName: currentChannelName,
         description: currentVideoDescription, duration: currentVideoDuration,
@@ -2089,7 +2184,7 @@ async function loadFromCache(videoId) {
     const result = await chrome.storage.local.get(`digest_${videoId}`);
     const cached = result[`digest_${videoId}`];
 
-    if (!cached) return null;
+    if (!cached?.transcript?.length) return null;
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;

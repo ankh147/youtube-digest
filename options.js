@@ -13,7 +13,7 @@ const YTD_OPTIONS = (() => {
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
       supadataApiKeyPlaceholder: "Paste your Supadata key",
-      supadataHelp: "Used for YouTube and X subtitles. Bilibili reads subtitle tracks directly. ",
+      supadataHelp: "Optional fallback for YouTube and X subtitles. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -84,7 +84,7 @@ const YTD_OPTIONS = (() => {
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
       supadataApiKeyPlaceholder: "粘贴你的 Supadata 密钥",
-      supadataHelp: "用于获取 YouTube 和 X 视频的字幕。哔哩哔哩直接读取站内字幕轨。",
+      supadataHelp: "用于 YouTube 和 X 的备用字幕选项。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",

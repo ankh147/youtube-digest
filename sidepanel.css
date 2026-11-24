@@ -331,6 +331,36 @@ body {
   margin: 0;
 }
 
+.transcript-acquisition {
+  margin-bottom: 18px;
+  padding: 12px;
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.transcript-acquisition p {
+  margin: 0 0 8px;
+}
+
+.transcript-acquisition p:empty {
+  margin: 0;
+}
+
+.transcript-acquisition details {
+  margin-top: 10px;
+}
+
+.transcript-acquisition summary {
+  color: var(--text);
+  cursor: pointer;
+}
+
+.transcript-acquisition details p {
+  margin-top: 10px;
+}
+
 .section-header {
   display: flex;
   align-items: center;

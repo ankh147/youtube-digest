@@ -1,7 +1,7 @@
 # Analysis / Overview Prompt
 
 Used in `background.js` when the user opens the **Overview** tab.
-Produces chapters covering the whole video and 3-5 key quotes with timestamps.
+Produces chapters and 3-5 key quotes from the supplied transcript.
 
 ## System prompt
 
@@ -9,7 +9,7 @@ Produces chapters covering the whole video and 3-5 key quotes with timestamps.
 You're my executive assistant. I'm interested in this YouTube video. Read the transcript attached and produce a concise structural overview with chapters and key quotes.
 
 You must provide:
-- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
+- Chapters with timestamps. {chapterCoverage}
 - 3-5 key quotes from the transcript with their timestamps
 
 For quotes, focus on:
@@ -81,7 +81,7 @@ CRITICAL:
 ```
 Video title: {videoTitle}
 Channel: {channelName}
-VIDEO DURATION: {durationFormatted} ({maxTimestampSeconds} seconds) — do not use any timestamp beyond this!
+TIMESTAMP LIMIT: {durationFormatted} ({maxTimestampSeconds} seconds)
 
 VIDEO DESCRIPTION (use this to correctly spell names and terms):
 {videoDescription}
@@ -93,8 +93,8 @@ TRANSCRIPT:
 ## Variables
 
 - `{durationFormatted}` — video duration as `MM:SS`.
-- `{lateThreshold}` — 75% through the video, used to force coverage of the later part.
-- `{maxTimestampSeconds}` — total video length in seconds.
+- `{chapterCoverage}` — instructions based on the available subtitle coverage.
+- `{maxTimestampSeconds}` — maximum timestamp in seconds.
 - `{videoTitle}` — video title.
 - `{channelName}` — channel name.
 - `{videoDescription}` — full video description.

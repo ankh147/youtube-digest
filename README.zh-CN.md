@@ -11,7 +11,7 @@
 - 保存自动润色的时间戳笔记，方便之后复习。
 - 使用自己的 API Key，数据保存在本地 Chrome 中，不包含分析统计或行为追踪。
 
-YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitHub 安装。目前没有上架 Chrome 应用商店，不赠送 API 额度，也没有开发者运营的服务器。
+YouTube Digest 是一个通过 GitHub 安装的开源扩展。使用 AI 功能或 Supadata 备用选项时，需要自行提供对应的 API Key。目前没有上架 Chrome 应用商店，不赠送 API 额度，也没有开发者运营的服务器。
 
 点击查看演示和教学视频（小白友好）：[https://www.bilibili.com/video/BV1dnuq6dEak/](https://www.bilibili.com/video/BV1dnuq6dEak/)
 
@@ -60,9 +60,9 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ## 设置 API Key
 
-YouTube Digest 需要你在自己的服务账号中准备两个 Key：
+读取网页字幕无需 API Key。你可以按需要配置自己的服务账号密钥：
 
-1. **Supadata API Key**，用于获取 YouTube 字幕。
+1. **Supadata API Key**，用于 YouTube 和 X 的备用字幕选项。
 2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
 
 ### 获取 Supadata API Key
@@ -102,7 +102,7 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 ## 使用 YouTube Digest
 
 1. 打开 YouTube 或哔哩哔哩的视频播放页，或打开一条带视频的公开 X 帖子。
-2. 点击页面上的 **摘要** 或 Chrome 工具栏里的扩展图标，打开侧边栏。X 视频首次获取时，查看额度说明后点 **获取字幕**。
+2. 点击页面上的 **摘要** 或 Chrome 工具栏里的扩展图标，打开侧边栏。侧边栏会先尝试读取网页字幕。
 3. 阅读、搜索并点击带时间戳的字幕跳转。也可选择 **原文**、**中文** 或 **双语**。
 4. 打开 **概览** 查看 AI 生成的章节和重点引用，或选中字幕获取讲解。
 5. 从播放器、所选字幕或重点引用中保存笔记，在 **笔记** 中查看。
@@ -110,8 +110,8 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 ## 当前支持范围
 
 - Chrome 116 或更高版本。
-- YouTube 的 `youtube.com/watch` 播放页通过 Supadata 读取现有字幕，优先英文。
-- X（Twitter）的公开视频帖子通过 Supadata 取字幕，合适时从语音生成。时间戳笔记链接在装有扩展的 Chrome 中跳转。
+- YouTube 的 `youtube.com/watch` 播放页直接读取网页转写文稿。
+- X（Twitter）的公开视频帖子直接读取播放器提供的字幕轨。时间戳笔记链接在装有扩展的 Chrome 中跳转。
 - 哔哩哔哩的 BV 视频播放页直接读取当前分 P 的字幕轨。部分字幕需要在当前浏览器登录 B 站。无字幕轨或仅有画面内字幕的视频无法读取。
 - 原文、简体中文和双语对照字幕。
 - AI 概览、选中文本讲解、翻译和自动润色笔记。
@@ -120,7 +120,7 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-YouTube 使用 Supadata 的 `mode=native`。X 在用户点 **获取字幕** 后才使用 `mode=auto`，没有现成字幕时由 Supadata 从语音生成。哔哩哔哩取字幕不使用 Supadata。
+扩展先查本地缓存，再读网页字幕。覆盖范围待确认时会在字幕和概览中标明。YouTube 和 X 可手动选择 Supadata 查找现成字幕（`mode=native`）或转录全片（`mode=generate`）。哔哩哔哩直接读取站内字幕轨。
 
 ## Supadata 免费额度和请求成本
 
@@ -129,7 +129,7 @@ YouTube 使用 Supadata 的 `mode=native`。X 在用户点 **获取字幕** 后�
 [Supadata 字幕接口文档](https://docs.supadata.ai/get-transcript)说明了不同模式的计费方式：
 
 - 获取一次原生字幕消耗 **1 credit**，与视频时长无关。
-- AI 生成字幕每分钟消耗 **2 credits**。仅在 X 的字幕请求需要从语音生成时适用。
+- AI 生成字幕每分钟消耗 **2 credits**。适用于在 YouTube 或 X 主动选择转录整个视频。
 - 如果没有可用原生字幕并返回 HTTP `206`，仍会消耗 **1 credit**。
 
 如果只获取原生字幕且每次请求都成功，免费版每月大约可以查询 100 个视频。重试和没有字幕的查询也会消耗额度，所以实际成功数量可能更少。
@@ -177,7 +177,7 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 
 YouTube Digest 会直接从扩展向服务商发送请求：
 
-1. 把标准化的 YouTube 视频或 X 帖子地址发送给 Supadata。哔哩哔哩字幕直接向 B 站及其字幕服务器获取。
+1. 从 YouTube 和 X 网页直接读取字幕，或从 B 站及其字幕服务器读取字幕。你选择 Supadata 后，扩展会将标准化的 YouTube 视频或 X 帖子地址发送给 Supadata。
 2. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
 3. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 4. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
@@ -203,7 +203,7 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 
 ### YouTube Digest 提示需要设置
 
-- 打开 **Settings**，保存 Supadata Key 和 DeepSeek Key。
+- 打开 **Settings**，按需要填写用于备用字幕的 Supadata Key 或用于 AI 功能的 DeepSeek Key。
 - 发布版本固定使用 DeepSeek V4 Flash，没有需要填写的 Base URL 或 Model 字段。
 - 如果设置提示旧的自定义服务已移除，请重新填写 DeepSeek Key。旧 AI Key 已安全清除，避免被错误用于 DeepSeek。
 
@@ -213,7 +213,7 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 - 检查 Supadata Key、剩余额度、限速和账号状态。
 - 没有字幕的查询和手动重试也可能消耗额度。
 
-YouTube 和哔哩哔哩无可用字幕轨时会显示提示。X 使用 Supadata 的自动转录模式。
+网页字幕无法取得或覆盖范围待确认时，可以重试网页字幕。YouTube 和 X 也可以手动选择 Supadata。
 
 ### AI 请求失败
 

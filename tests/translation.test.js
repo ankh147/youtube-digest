@@ -90,6 +90,7 @@ function loadBackgroundHelpers({
 } = {}) {
   const listeners = { addListener() {} };
   const localStorage = { ytd_settings: settings };
+  const sessionStorage = {};
   const sandbox = {
     console,
     URL,
@@ -103,6 +104,11 @@ function loadBackgroundHelpers({
     importScripts() {},
     chrome: {
       storage: {
+        session: {
+          get: async (key) => ({ [key]: sessionStorage[key] }),
+          set: async (values) => Object.assign(sessionStorage, values),
+          remove: async (key) => { delete sessionStorage[key]; },
+        },
         local: {
           setAccessLevel: () => Promise.resolve(),
           get: async (key) => {
@@ -144,30 +150,67 @@ function loadBackgroundHelpers({
   return sandbox.__YTD_TRANSLATION_TESTING__;
 }
 
-test("transcript requests route by site and only X can opt into speech transcription", async () => {
+test("YouTube and X try web subtitles without Supadata and paid modes require an explicit method", async () => {
   const calls = [];
   const { getTimestampedTranscript } = loadSidepanelHelpers();
+  let tabUrl = "https://x.com/SpaceX/status/1234567890";
   const { handleFetchTranscript } = loadBackgroundHelpers({
     settings: { supadataApiKey: "test-key" },
+    tabs: {
+      get: async () => ({ url: tabUrl }),
+      sendMessage: async (_tabId, message) => message.videoId.startsWith("x:")
+        ? { success: false, error: "no track" }
+        : { success: true, entries: [{ text: "网页字幕", start: 2 }] },
+    },
     fetchImpl: async (url) => {
       calls.push(new URL(url));
       return new Response(JSON.stringify({ content: [{ text: "Speech", offset: 9200 }], lang: "en" }));
     },
   });
-  assert.equal((await handleFetchTranscript("x:1234567890")).success, false);
+  assert.equal((await handleFetchTranscript("x:1234567890", { tabId: 1 })).error, "no track");
+  tabUrl = "https://www.youtube.com/watch?v=video123";
+  const native = await handleFetchTranscript("video123", { tabId: 1 });
+  assert.equal(getTimestampedTranscript(native), "[0:02] 网页字幕");
   assert.equal(calls.length, 0);
+  assert.equal((await handleFetchTranscript("video123", { method: "auto" })).success, false);
+  assert.equal((await handleFetchTranscript("bili:BV1DXKS6rEYq:2", { method: "generate" })).success, false);
   const [x, repeated] = await Promise.all([
-    handleFetchTranscript("x:1234567890", { allowXTranscription: true }),
-    handleFetchTranscript("x:1234567890", { allowXTranscription: true }),
+    handleFetchTranscript("x:1234567890", { method: "generate" }),
+    handleFetchTranscript("x:1234567890", { method: "generate" }),
   ]);
+  assert.equal(x.transcript[0].start, 9.2);
   assert.equal(getTimestampedTranscript(x), "[0:09] Speech");
   assert.equal(repeated.transcriptTimestamped, x.transcriptTimestamped);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].searchParams.get("mode"), "auto");
+  assert.equal(calls[0].searchParams.get("mode"), "generate");
   assert.equal(calls[0].searchParams.get("url"), "https://x.com/i/status/1234567890");
-  const youtube = await handleFetchTranscript("video123");
+  const youtube = await handleFetchTranscript("video123", { method: "native" });
   assert.equal(getTimestampedTranscript(youtube), "[0:09] Speech");
   assert.equal(calls[1].searchParams.get("mode"), "native");
+});
+
+test("retrying a pending Supadata job polls the same job without submitting it twice", async () => {
+  let jobs = 0;
+  let polls = 0;
+  const { handleFetchTranscript } = loadBackgroundHelpers({
+    settings: { supadataApiKey: "test-key" },
+    setTimeoutImpl: (fn) => { fn(); return 0; },
+    fetchImpl: async (url) => {
+      if (new URL(url).pathname === "/v1/transcript") {
+        jobs += 1;
+        return new Response(JSON.stringify({ jobId: "long-job" }), { status: 202 });
+      }
+      assert.match(url, /long-job$/);
+      polls += 1;
+      return new Response(JSON.stringify(polls <= 60
+        ? { status: "active" }
+        : { status: "completed", content: [{ offset: 0, text: "已生成" }] }));
+    },
+  });
+  assert.equal((await handleFetchTranscript("video123", { method: "generate" })).success, false);
+  assert.equal((await handleFetchTranscript("video123", { method: "generate" })).success, true);
+  assert.equal(jobs, 1);
+  assert.equal(polls, 61);
 });
 
 test("Bilibili uses the requested part and falls back when its first subtitle track is empty", async () => {
@@ -193,6 +236,44 @@ test("Bilibili uses the requested part and falls back when its first subtitle tr
   assert.equal(getTimestampedTranscript(result), "[1:02] Part two");
   assert.equal(result.language, "en");
   assert.equal(result.videoInfo.title, "Part Two");
+});
+
+test("Bilibili tries another track when the preferred track only covers the beginning", async () => {
+  const preferred = { lang: "zh-CN", url: "partial" };
+  const alternate = { lang: "en", url: "complete" };
+  const { handleFetchTranscript } = loadBackgroundHelpers({
+    biliApi: {
+      fetchVideoInfo: async () => ({ pageCount: 1, duration: 1000 }),
+      fetchSubtitleTracks: async () => ({ tracks: [preferred, alternate] }),
+      pickSubtitleTrack: () => preferred,
+      fetchSubtitleTrackContent: async (url) => Array.from(
+        { length: url === "partial" ? 2 : 20 },
+        (_, index) => ({ text: "字幕", start: index * 50, duration: 45 }),
+      ),
+    },
+  });
+  const result = await handleFetchTranscript("bili:BV1DXKS6rEYq:1");
+  assert.equal(result.language, "en");
+  assert.equal(result.transcript.length, 20);
+});
+
+test("partial overviews instruct the model to omit missing sections and remove unsupported timestamps", async () => {
+  const { handleAnalyzeTranscript } = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/prompts/analysis.md")) return new Response(read("prompts/analysis.md"));
+      const { messages } = JSON.parse(options.body);
+      assert.match(messages[0].content, /Omit missing sections/);
+      assert.doesNotMatch(messages[0].content, /COVER THE ENTIRE VIDEO/);
+      const analysis = { chapters: [
+        { title: "有字幕", timestampSeconds: 30 },
+        { title: "缺失", timestampSeconds: 80 },
+      ] };
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(analysis) } }] }));
+    },
+  });
+  const result = await handleAnalyzeTranscript("[0:30] 起点\n[2:00] 下一部分", "标题", "", "", 120, true);
+  assert.ok(result.success);
+  assert.deepEqual(Array.from(result.analysis.chapters, ({ title }) => title), ["有字幕"]);
 });
 
 test("overview uses cached timestamped text or rebuilds it from cached subtitles", () => {

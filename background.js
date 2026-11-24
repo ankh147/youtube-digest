@@ -1,16 +1,3 @@
-/**
- * BACKGROUND SERVICE WORKER
- *
- * This is the "brain" of the extension. It runs in the background and handles:
- * 1. Opening the side panel when the user clicks the extension icon
- * 2. Fetching subtitles from Supadata and Bilibili
- * 3. Calling DeepSeek to analyze the transcript
- * 4. Sending results back to the side panel
- *
- * Think of it like a backend server — it does the heavy lifting
- * so the UI (side panel) can stay fast and responsive.
- */
-
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
@@ -383,7 +370,7 @@ async function sendToVideoPage(tabId, source, payload) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(message.videoId, { allowXTranscription: message.allowXTranscription === true })
+    handleFetchTranscript(message.videoId, message)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
@@ -397,6 +384,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.channelName,
       message.videoDescription,
       message.videoDuration,
+      message.partialTranscript === true,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -532,7 +520,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const response = await sendToVideoPage(tab.id, source, message.payload);
         if (message.payload.action === "getVideoInfo" && source.platform === "youtube") {
           // Prefer the player's metadata to the playlist or collapsed DOM text.
-          const playerInfo = await getPlayerVideoDetails(tab.id);
+          const playerInfo = await getPlayerVideoDetails(tab.id, source.id);
           if (playerInfo) {
             sendResponse({
               success: true,
@@ -567,16 +555,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  *
  * Returns null on any failure so callers can fall back to DOM scraping.
  */
-async function getPlayerVideoDetails(tabId) {
+async function getPlayerVideoDetails(tabId, videoId) {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      func: () => {
+      args: [videoId],
+      func: (expectedVideoId) => {
         try {
           const player = document.getElementById("movie_player");
           const details = player?.getPlayerResponse?.()?.videoDetails;
-          if (!details) return null;
+          if (details?.videoId !== expectedVideoId) return null;
           return {
             title: details.title || "",
             channelName: details.author || "",
@@ -595,39 +584,40 @@ async function getPlayerVideoDetails(tabId) {
   }
 }
 
-// ============================================================
-// TRANSCRIPT FETCHING VIA SUPADATA API
-// ============================================================
-
-/**
- * Fetches the transcript for a YouTube video using Supadata API.
- *
- * Supadata is a specialized service that reliably extracts transcripts
- * from YouTube videos. It handles all the complexity of parsing YouTube's
- * internal data structures, dealing with different caption formats, etc.
- *
- * API Docs: https://docs.supadata.ai
- *
- * @param {string} videoId - The YouTube video ID (e.g., "dQw4w9WgXcQ")
- * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
- */
 const transcriptRequests = new Map();
 
-async function handleFetchTranscript(videoId, { allowXTranscription = false } = {}) {
+async function handleFetchTranscript(videoId, { method = "web", tabId, duration } = {}) {
   const source = YTD_SETTINGS.videoFromId(videoId);
   if (!source) return { success: false, error: "无法识别视频地址。" };
-  if (source.platform === "x" && !allowXTranscription) {
-    return { success: false, error: "请先在摘要侧边栏获取此视频的字幕。" };
+  if (method !== "web" && (source.platform === "bilibili" || !["native", "generate"].includes(method))) {
+    return { success: false, error: "此平台不支持所选的字幕获取方式。" };
   }
 
-  if (!transcriptRequests.has(videoId)) {
-    const request = (source.platform === "bilibili"
-      ? fetchBilibiliTranscript(source)
-      : fetchSupadataTranscript(source)
-    ).finally(() => transcriptRequests.delete(videoId));
-    transcriptRequests.set(videoId, request);
+  const key = method === "web" ? `${videoId}:${method}:${tabId}` : `${videoId}:${method}`;
+  if (!transcriptRequests.has(key)) {
+    const request = (method !== "web"
+      ? fetchSupadataTranscript(source, method)
+      : source.platform === "bilibili" ? fetchBilibiliTranscript(source) : fetchPageTranscript(source, tabId, duration)
+    ).finally(() => transcriptRequests.delete(key));
+    transcriptRequests.set(key, request);
   }
-  return transcriptRequests.get(videoId);
+  return transcriptRequests.get(key);
+}
+
+async function fetchPageTranscript(source, tabId, duration) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (YTD_SETTINGS.videoFromUrl(tab.url)?.id !== source.id) {
+      return { success: false, error: "视频页面已切换。" };
+    }
+    const result = await sendToVideoPage(tabId, source, { action: "getNativeTranscript", duration });
+    if (result?.success) {
+      return { ...buildTranscript(result.entries, result.language, "没有读到网页字幕。"), videoDuration: result.duration };
+    }
+    return result || { success: false, error: "没有读到网页字幕。" };
+  } catch (error) {
+    return { success: false, error: "无法读取网页字幕，请刷新视频页面后重试。" };
+  }
 }
 
 async function fetchBilibiliTranscript(source) {
@@ -650,12 +640,14 @@ async function fetchBilibiliTranscript(source) {
 
     const ordered = [preferred, ...tracks.filter((track) => track !== preferred)];
     let lastError;
+    let best;
     for (const track of ordered) {
       try {
         const entries = await BILI_API.fetchSubtitleTrackContent(track.url);
         if (!entries.length) continue;
         const language = track.lang.replace(/^ai[-_]/i, "") || null;
-        return {
+        const coverage = YTD_SETTINGS.transcriptCoverage(entries, info.duration);
+        const result = {
           ...buildTranscript(entries, language, "哔哩哔哩返回了空字幕。"),
           videoInfo: {
             title: info.title,
@@ -664,17 +656,20 @@ async function fetchBilibiliTranscript(source) {
             duration: info.duration,
           },
         };
+        if (coverage.status === "covered") return result;
+        const length = YTD_SETTINGS.transcriptCoverageLength(coverage);
+        if (!best || length > best.length) best = { result, length };
       } catch (error) {
         lastError = error;
       }
     }
-    return { success: false, error: lastError?.message || "哔哩哔哩返回了空字幕。" };
+    return best?.result || { success: false, error: lastError?.message || "哔哩哔哩返回了空字幕。" };
   } catch (error) {
     return { success: false, error: error.message };
   }
 }
 
-async function fetchSupadataTranscript(source) {
+async function fetchSupadataTranscript(source, mode) {
   try {
     const settings = await getSettings();
     if (!settings.supadataApiKey) {
@@ -685,16 +680,19 @@ async function fetchSupadataTranscript(source) {
       };
     }
 
-    // Only send the canonical video address, with no browsing parameters.
-    // Using the universal transcript endpoint with text=false to get timestamped chunks
+    const jobKey = `supadataJob:${source.id}:${mode}`;
+    const pending = (await chrome.storage.session.get(jobKey))[jobKey];
+    if (pending && Date.now() - pending.startedAt < 60 * 60 * 1000) {
+      return await pollTranscriptJob(pending.id, settings.supadataApiKey, jobKey);
+    }
+
+    // Canonical URLs omit browsing parameters.
     const apiUrl = new URL("https://api.supadata.ai/v1/transcript");
     apiUrl.searchParams.set("url", source.url);
-    apiUrl.searchParams.set("text", "false"); // Get timestamped chunks, not plain text
+    apiUrl.searchParams.set("text", "false");
     if (source.platform === "youtube") apiUrl.searchParams.set("lang", "en");
-    // X-only fallback is disclosed on the panel before an uncached request.
-    apiUrl.searchParams.set("mode", source.platform === "x" ? "auto" : "native");
+    apiUrl.searchParams.set("mode", mode);
 
-    // Make the API request
     const response = await fetch(apiUrl.toString(), {
       method: "GET",
       headers: {
@@ -702,20 +700,18 @@ async function fetchSupadataTranscript(source) {
       },
     });
 
-    // Handle async jobs (for videos > 20 minutes, Supadata returns a job ID)
     if (response.status === 202) {
       const jobData = await response.json();
-      // Poll for the result
-      return await pollTranscriptJob(jobData.jobId, settings.supadataApiKey);
+      if (typeof jobData.jobId !== "string" || !jobData.jobId) throw new Error("Supadata 未返回转录任务编号。");
+      await chrome.storage.session.set({ [jobKey]: { id: jobData.jobId, startedAt: Date.now() } });
+      return await pollTranscriptJob(jobData.jobId, settings.supadataApiKey, jobKey);
     }
 
     if (response.status === 206) {
       return {
         success: false,
         error: "NO_TRANSCRIPT",
-        message: source.platform === "x"
-          ? "Supadata 未能为这条 X 视频返回字幕。"
-          : "No native subtitle track is available for this video.",
+        message: "Supadata 未找到可用字幕。此次查找扣 1 点额度。",
       };
     }
 
@@ -768,8 +764,8 @@ function parseSupadataTranscript(data) {
     if (!text) return [];
     return [{
       text,
-      start: Math.max(0, Math.floor((Number(chunk.offset) || 0) / 1000)),
-      duration: Math.max(0, Math.floor((Number(chunk.duration) || 0) / 1000)),
+      start: Math.max(0, (Number(chunk.offset) || 0) / 1000),
+      duration: Math.max(0, (Number(chunk.duration) || 0) / 1000),
       language: chunk.lang || language,
     }];
   });
@@ -787,19 +783,11 @@ function buildTranscript(entries, language, emptyMessage) {
   };
 }
 
-/**
- * Polls for transcript job completion (for long videos).
- * Supadata processes videos > 20 minutes asynchronously.
- *
- * @param {string} jobId - The job ID returned by the initial request
- * @returns {Object} - Same format as handleFetchTranscript
- */
-async function pollTranscriptJob(jobId, supadataApiKey) {
-  const maxAttempts = 60; // Max 60 seconds of polling
-  const pollInterval = 1000; // Poll every 1 second
+async function pollTranscriptJob(jobId, supadataApiKey, jobKey) {
+  const maxAttempts = 60;
+  const pollInterval = 1000;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    // Wait before polling
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
     const response = await fetch(
@@ -810,23 +798,25 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
     );
 
     if (!response.ok) {
+      if (response.status === 404) await chrome.storage.session.remove(jobKey);
       throw new Error(`Job polling failed: ${response.status}`);
     }
 
     const data = await response.json();
 
     if (data.status === "completed") {
+      await chrome.storage.session.remove(jobKey);
       return parseSupadataTranscript(data.result || data);
     }
 
     if (data.status === "failed") {
+      await chrome.storage.session.remove(jobKey);
       throw new Error("Transcript processing failed");
     }
 
-    // Status is 'queued' or 'active' — keep polling
   }
 
-  throw new Error("Transcript processing timed out");
+  return { success: false, error: "任务仍在处理中。稍后点同一选项可继续查询原任务。" };
 }
 
 // ============================================================
@@ -876,8 +866,7 @@ function parseLooseJson(text) {
 /**
  * Sends the transcript to DeepSeek for analysis.
  *
- * The prompt asks the model to produce chapters covering the whole video
- * and 3-5 key quotes with timestamps.
+ * The prompt limits an overview to the supplied subtitle coverage.
  *
  * @param {string} transcriptText - The full transcript as plain text
  * @param {string} videoTitle - The video title
@@ -890,6 +879,7 @@ async function handleAnalyzeTranscript(
   channelName,
   videoDescription,
   videoDuration,
+  partialTranscript = false,
 ) {
   try {
     const settings = await getSettings();
@@ -906,13 +896,9 @@ async function handleAnalyzeTranscript(
     // marker is the most reliable signal of where the content actually ends —
     // more trustworthy than the duration metadata, which is sometimes missing
     // or wrong. We use the larger of (metadata duration, last transcript stamp).
-    let lastTranscriptSeconds = 0;
-    const stampMatches = transcriptText.match(/\[(\d+):(\d{2})\]/g) || [];
-    if (stampMatches.length) {
-      const last =
-        stampMatches[stampMatches.length - 1].match(/\[(\d+):(\d{2})\]/);
-      lastTranscriptSeconds = parseInt(last[1]) * 60 + parseInt(last[2]);
-    }
+    const transcriptTimes = [...transcriptText.matchAll(/^\[(\d+):(\d{2})\]/gm)]
+      .map(([, minutes, seconds]) => Number(minutes) * 60 + Number(seconds));
+    const lastTranscriptSeconds = transcriptTimes.at(-1) || 0;
 
     const effectiveSeconds = Math.max(
       Math.floor(videoDuration || 0),
@@ -923,9 +909,6 @@ async function handleAnalyzeTranscript(
     const durationFormatted = `${durationMinutes}:${String(durationSeconds).padStart(2, "0")}`;
     const maxTimestampSeconds = effectiveSeconds;
 
-    // The "last chapter must be after" threshold (75% in) forces the model to
-    // cover the WHOLE video instead of front-loading chapters near the start.
-    // We do NOT prescribe a chapter count — the model picks the natural splits.
     const lateThresholdSeconds = Math.floor(effectiveSeconds * 0.75);
     const lateThreshold = `${Math.floor(lateThresholdSeconds / 60)}:${String(
       lateThresholdSeconds % 60,
@@ -933,7 +916,9 @@ async function handleAnalyzeTranscript(
 
     const promptVariables = {
       durationFormatted,
-      lateThreshold,
+      chapterCoverage: partialTranscript
+        ? "Organize chapters around the supplied transcript only. It may start late, end early or contain gaps. Omit missing sections and use only timestamps in the supplied transcript."
+        : `Cover topics throughout the supplied transcript up to ${durationFormatted}. When a distinct topic begins after ${lateThreshold}, include it. Let topic changes determine the number of chapters.`,
       maxTimestampSeconds,
       videoTitle: videoTitle || "Unknown",
       channelName: channelName || "Unknown",
@@ -967,6 +952,12 @@ async function handleAnalyzeTranscript(
     // Treat every model response as untrusted data. Rebuild the supported
     // schema and derive display timestamps from validated numeric seconds.
     const analysis = validateAndFixTimestamps(parsedAnalysis, maxTimestampSeconds);
+    if (partialTranscript) {
+      const availableTimes = new Set(transcriptTimes);
+      analysis.chapters = analysis.chapters.filter(({ timestampSeconds }) => availableTimes.has(timestampSeconds));
+      analysis.keyQuotes = analysis.keyQuotes.filter(({ timestampSeconds }) => availableTimes.has(timestampSeconds));
+      analysis.keyMoments = analysis.keyMoments.filter((seconds) => availableTimes.has(seconds));
+    }
     if (!analysis.chapters.length && !analysis.keyQuotes.length) {
       return { success: false, error: "EMPTY_OVERVIEW" };
     }

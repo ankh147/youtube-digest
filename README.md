@@ -11,7 +11,7 @@ Turn every YouTube video into a resource for deep learning. YouTube Digest bring
 - Save polished timestamped notes for later study.
 - Keep control of your data with your own API keys, local Chrome storage, and no analytics or telemetry.
 
-YouTube Digest is a bring-your-own-key project installed locally from GitHub. It is not available through the Chrome Web Store, does not include API credits, and does not run a developer-operated server.
+YouTube Digest is installed locally from GitHub. AI features and the optional Supadata fallback use your own API keys. It is not available through the Chrome Web Store, does not include API credits, and does not run a developer-operated server.
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
@@ -58,9 +58,9 @@ Because this is an unpacked extension, it does not update automatically. After d
 
 ## Set up your API keys
 
-YouTube Digest needs two keys under your own provider accounts:
+Native subtitles work without API keys. Configure the keys for the features you want to use:
 
-1. A **Supadata API key** for YouTube and X transcripts. Bilibili reads its own subtitle tracks.
+1. A **Supadata API key** for the optional YouTube and X subtitle fallback.
 2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
 
 ### Get a Supadata API key
@@ -110,8 +110,8 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
-- YouTube native captions through Supadata, with English preferred when available.
-- Public X video posts through Supadata. Select **获取字幕** after reviewing credit usage. Timestamp links for X work in Chrome with this extension.
+- YouTube transcripts read from the video's own transcript panel.
+- Subtitle tracks exposed by the player on public X video posts. Timestamp links for X work in Chrome with this extension.
 - Bilibili BV video pages and individual parts read their subtitle tracks directly. Some tracks require signing in to Bilibili. Videos without a subtitle track cannot be transcribed by this integration.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - AI overviews, selected-text explanations, translation, and automatic note polishing.
@@ -120,7 +120,7 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
-YouTube uses Supadata's `mode=native`. X uses `mode=auto` after you select **获取字幕**, allowing audio transcription when existing captions are unavailable. Bilibili retrieves captions from Bilibili directly.
+The extension checks the local cache first, then reads native subtitles. It marks unconfirmed coverage and labels overviews based on partial subtitles. On YouTube and X, you can then choose a Supadata lookup (`mode=native`) or full-video transcription (`mode=generate`). Bilibili reads its own subtitle tracks.
 
 ## Supadata free tier and request costs
 
@@ -129,7 +129,7 @@ Current as of August 9, 2026, the [Supadata pricing page](https://supadata.ai/pr
 The [Supadata transcript documentation](https://docs.supadata.ai/get-transcript) describes the transcript request modes and credit behavior:
 
 - A native transcript request uses **1 credit**, regardless of video duration.
-- A generated transcript costs **2 credits per video minute**. Only X can use this path when Supadata needs to generate captions.
+- A generated transcript costs **2 credits per video minute**. YouTube and X use this path only after you select full-video transcription.
 - An unavailable native lookup returned as HTTP `206` still uses **1 credit**.
 
 For native captions, the free tier can cover roughly 100 transcript lookups per month when each request succeeds once. Retries, unavailable-caption lookups and speech transcription also consume credits.
@@ -177,7 +177,7 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 
 YouTube Digest makes provider requests directly from the extension:
 
-1. It sends a canonical YouTube watch URL or X post URL to Supadata. The Bilibili integration fetches subtitles directly from Bilibili and its subtitle CDN.
+1. It reads captions locally from YouTube and X pages, or from Bilibili and its subtitle CDN. If you choose a Supadata option, it sends the canonical YouTube video URL or X post URL to Supadata.
 2. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
 3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 4. It stores keys, settings, notes, and recent cache entries locally in Chrome.
@@ -203,7 +203,7 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 
 ### YouTube Digest asks for setup
 
-- Open **Settings** and save both a Supadata key and a DeepSeek key.
+- Open **Settings** and add a Supadata key for subtitle fallback or a DeepSeek key for AI features.
 - This published version uses the fixed DeepSeek V4 Flash endpoint and model. There are no Base URL or Model fields to configure.
 - If Settings says a legacy custom provider was removed, enter a DeepSeek key. The old AI key was cleared so it could not be reused with the wrong service.
 
@@ -213,7 +213,7 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 - Check your Supadata key, remaining credits, rate limit, and account status.
 - Remember that unavailable native lookups and manual retries may still consume credits.
 
-YouTube Digest will not fall back to generated transcription.
+If local subtitles are unavailable or their coverage is uncertain, you can choose a Supadata fallback for YouTube or X.
 
 ### AI requests fail
 

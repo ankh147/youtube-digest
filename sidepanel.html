@@ -81,14 +81,6 @@
         </div>
       </div>
 
-      <div id="xConsentState" class="welcome-container" style="display: none">
-        <div class="welcome-title">获取这条 X 视频的字幕</div>
-        <div class="welcome-desc" id="xTranscriptCost">
-          请用于公开帖子。Supadata 读取已有字幕扣 1 点额度，从语音生成字幕每分钟扣 2 点额度。
-        </div>
-        <button class="error-btn" id="xTranscriptBtn" type="button" aria-describedby="xTranscriptCost">获取字幕</button>
-      </div>
-
       <!-- LOADING STATE -->
       <div id="loadingState" style="display: none">
         <div class="loading-container">
@@ -112,13 +104,27 @@
         </div>
       </div>
 
+      <section id="transcriptAcquisition" class="transcript-acquisition" hidden>
+        <p id="transcriptCoverageStatus"></p>
+        <p id="transcriptRequestStatus" role="status"></p>
+        <button class="enhance-btn" type="button" data-transcript-method="web">重试读取网页字幕</button>
+        <button class="enhance-btn" id="transcriptSettingsBtn" type="button" hidden>打开设置</button>
+        <details id="supadataChoices" hidden>
+          <summary>Supadata 备用选项</summary>
+          <p id="supadataNativeCost">查找现成字幕每个视频 1 点额度。返回字幕不可用时也扣 1 点。</p>
+          <button class="enhance-btn" type="button" data-transcript-method="native" aria-describedby="supadataNativeCost">查找现成字幕</button>
+          <p id="supadataGenerateCost">从语音生成字幕按视频全长计费，每分钟 2 点额度。</p>
+          <button class="enhance-btn" type="button" data-transcript-method="generate" aria-describedby="supadataGenerateCost">转录整个视频</button>
+        </details>
+      </section>
+
       <!-- RESULTS -->
       <div id="resultsState" style="display: none">
         <!-- TAB: Transcript (default - no LLM required) -->
         <div class="tab-panel active" data-panel="transcript">
           <div class="section">
             <div class="section-header transcript-section-header">
-              <div class="section-title">完整字幕</div>
+              <div class="section-title">视频字幕</div>
               <div class="transcript-actions">
                 <button class="enhance-btn" id="copyTranscriptBtn">复制</button>
                 <button class="enhance-btn" id="exportTranscriptBtn">
@@ -192,6 +198,7 @@
 
         <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
         <div class="tab-panel" data-panel="overview">
+          <p class="overview-message" id="overviewCoverage" hidden></p>
           <p class="overview-message" id="overviewLoading" hidden>正在生成概览…</p>
           <p class="overview-message" id="overviewError" role="status"></p>
           <button class="enhance-btn" id="overviewRetry" type="button" hidden>

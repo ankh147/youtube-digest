@@ -75,3 +75,19 @@ test("Supadata receives a canonical YouTube URL", () => {
     /Invalid YouTube video ID/,
   );
 });
+
+test("coverage flags a short prefix and interior gaps while allowing normal credits and unknown duration", () => {
+  const { transcriptCoverage } = require("../settings.js");
+  const cues = (end) => Array.from({ length: end / 10 }, (_, index) => ({
+    start: index * 10,
+    duration: 8,
+  }));
+  assert.equal(transcriptCoverage(cues(7100), 7115).status, "covered");
+  const prefix = transcriptCoverage(cues(1200), 7200);
+  assert.equal(prefix.status, "partial");
+  assert.equal(prefix.end, 1198);
+  const withGap = transcriptCoverage(cues(1200).filter(({ start }) => start < 300 || start >= 720), 1200);
+  assert.equal(withGap.status, "partial");
+  assert.deepEqual(withGap.gaps, [{ start: 298, end: 720 }]);
+  assert.equal(transcriptCoverage(cues(900), 0).status, "unknown");
+});

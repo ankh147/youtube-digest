@@ -121,6 +121,35 @@ var YTD_SETTINGS = (() => {
     }).join("\n");
   }
 
+  function transcriptCoverage(entries, videoDuration) {
+    const duration = Number.isFinite(videoDuration) && videoDuration > 0 ? videoDuration : 0;
+    const ranges = entries.filter(({ start }) => Number.isFinite(start) && start >= 0)
+      .map(({ start, duration }) => ({
+        start,
+        end: start + (Number.isFinite(duration) && duration > 0 ? duration : 0),
+      }))
+      .sort((a, b) => a.start - b.start);
+    if (!ranges.length) return { status: "missing", duration, start: 0, end: 0, gaps: [] };
+
+    const start = ranges[0].start;
+    const edgeTolerance = Math.min(90, Math.max(18, duration * 0.02));
+    const gapTolerance = Math.min(240, Math.max(35, duration * 0.035));
+    const gaps = [];
+    let end = ranges[0].end;
+    for (const range of ranges.slice(1)) {
+      if (range.start - end > gapTolerance) gaps.push({ start: end, end: range.start });
+      end = Math.max(end, range.end);
+    }
+
+    const partial = start > edgeTolerance || gaps.length > 0 || (duration > 0 && duration - end > edgeTolerance);
+    const status = partial ? "partial" : duration ? "covered" : "unknown";
+    return { status, duration, start, end, gaps };
+  }
+
+  function transcriptCoverageLength({ start, end, gaps }) {
+    return end - start - gaps.reduce((total, gap) => total + gap.end - gap.start, 0);
+  }
+
   return {
     STORAGE_KEY,
     DEFAULTS,
@@ -134,6 +163,8 @@ var YTD_SETTINGS = (() => {
     supportsPanel,
     timestampUrl,
     formatTimestampedTranscript,
+    transcriptCoverage,
+    transcriptCoverageLength,
   };
 })();
 

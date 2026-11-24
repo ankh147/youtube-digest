@@ -2,7 +2,7 @@
 
 Effective: November 24, 2026 for this local version
 
-YouTube Digest is a GitHub-only, bring-your-own-key Chrome extension. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
+YouTube Digest is a Chrome extension distributed through GitHub. AI features and the optional Supadata fallback use your own API keys. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
 
 ## Data the extension handles
 
@@ -22,7 +22,7 @@ Depending on the feature you use, YouTube Digest handles:
 
 ### Supadata
 
-YouTube Digest sends the canonical YouTube video URL or public X post URL to `https://api.supadata.ai` with your Supadata API key. Supadata returns the transcript and timestamps. On X, the service may transcribe the audio after you select **获取字幕**.
+When you select a Supadata fallback, YouTube Digest sends the canonical YouTube video URL or public X post URL to `https://api.supadata.ai` with your Supadata API key. Supadata returns the transcript and timestamps. You can choose to look up existing captions or have Supadata transcribe the audio.
 
 ### Bilibili
 
