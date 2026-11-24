@@ -3,6 +3,20 @@ const assert = require("node:assert/strict");
 
 const settings = require("../settings.js");
 
+test("video identities keep existing YouTube keys and isolate X and Bilibili parts", () => {
+  const youtube = settings.videoFromUrl("https://www.youtube.com/watch?v=video123&list=other");
+  assert.equal(youtube.id, "video123");
+  const x = settings.videoFromUrl("https://twitter.com/SpaceX/status/1481651037291225113?s=42");
+  assert.equal(x.id, settings.videoFromUrl("https://x.com/i/status/1481651037291225113").id);
+  assert.equal(settings.timestampUrl(x, 12.8), "https://x.com/i/status/1481651037291225113#digest-t=12");
+  const bili = settings.videoFromUrl("https://www.bilibili.com/video/BV1DXKS6rEYq/?p=2&spm_id_from=foo");
+  assert.equal(bili.id, "bili:BV1DXKS6rEYq:2");
+  assert.notEqual(bili.id, settings.videoFromUrl("https://www.bilibili.com/video/BV1DXKS6rEYq/").id);
+  assert.equal(settings.timestampUrl(bili, 92), "https://www.bilibili.com/video/BV1DXKS6rEYq?p=2&t=92");
+  assert.equal(settings.videoFromUrl("https://x.com.example.org/i/status/123"), null);
+  assert.equal(settings.videoFromUrl("https://x.com/SpaceX/status/123/video/2"), null);
+});
+
 test("DeepSeek defaults use V4 Flash", () => {
   const normalized = settings.normalize({
     provider: "unexpected",

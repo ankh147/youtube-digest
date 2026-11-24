@@ -46,7 +46,7 @@ test("Settings copy covers English and Simplified Chinese", () => {
 
   const html = read("options.html");
   const referencedKeys = [
-    ...html.matchAll(/data-i18n(?:-html|-aria-label)?="([^"]+)"/g),
+    ...html.matchAll(/data-i18n(?:-html|-aria-label|-placeholder)?="([^"]+)"/g),
   ].map((match) => match[1]);
   for (const key of referencedKeys) {
     assert.ok(options.COPY.en[key], `Missing English copy for ${key}`);

@@ -89,7 +89,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /native transcript request uses \*\*1 credit\*\*/i);
   assert.match(readme, /generated transcript costs \*\*2 credits per video minute\*\*/i);
   assert.match(readme, /HTTP `206` still uses \*\*1 credit\*\*/i);
-  assert.match(readme, /forces `mode=native`/i);
+  assert.match(readme, /YouTube uses Supadata's `mode=native`/i);
+  assert.match(readme, /X uses `mode=auto` after you select/);
   assert.match(readme, /roughly 100 transcript lookups per month/i);
   assert.match(readme, /supadata\.ai\/pricing/i);
   assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
@@ -230,7 +231,7 @@ test("note delete is an accessible SVG action at the end of the action row", () 
 
   assert.match(
     js,
-    /<div class="note-actions">[\s\S]*class="[^"]*note-play[^"]*"[\s\S]*class="note-delete"[\s\S]*aria-label="Delete note"[\s\S]*<svg viewBox="0 0 24 24" aria-hidden="true">/,
+    /<div class="note-actions">[\s\S]*class="[^"]*note-play[^"]*"[\s\S]*class="note-delete"[\s\S]*aria-label="删除笔记"[\s\S]*<svg viewBox="0 0 24 24" aria-hidden="true">/,
   );
   assert.doesNotMatch(js, /class="note-delete"[^>]*>Delete<\/button>/);
   assert.match(
@@ -247,11 +248,11 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
 
   assert.match(
     html,
-    /id="notesFilterThis"[\s\S]*?aria-pressed="true"[\s\S]*?>[\s\S]*?This Video/,
+    /id="notesFilterThis"[\s\S]*?aria-pressed="true"[\s\S]*?>[\s\S]*?当前视频/,
   );
   assert.match(
     html,
-    /id="notesFilterAll"[\s\S]*?aria-pressed="false"[\s\S]*?>[\s\S]*?All Notes/,
+    /id="notesFilterAll"[\s\S]*?aria-pressed="false"[\s\S]*?>[\s\S]*?全部笔记/,
   );
   assert.match(
     css,

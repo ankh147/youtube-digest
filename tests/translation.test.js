@@ -78,6 +78,7 @@ function loadBackgroundHelpers({
     aiModel: "deepseek-v4-flash",
   },
   fetchImpl = fetch,
+  biliApi,
   setTimeoutImpl = () => 0,
   clearTimeoutImpl = () => {},
   sidePanel = {
@@ -93,6 +94,7 @@ function loadBackgroundHelpers({
     TextDecoder,
     TextEncoder,
     fetch: fetchImpl,
+    BILI_API: biliApi,
     AbortController,
     setTimeout: setTimeoutImpl,
     clearTimeout: clearTimeoutImpl,
@@ -128,11 +130,10 @@ function loadBackgroundHelpers({
       tabs: { onUpdated: listeners, onActivated: listeners },
     },
     YTD_SETTINGS: {
+      ...require("../settings.js"),
       STORAGE_KEY: "ytd_settings",
       normalize: (value) => value,
       chatCompletionsUrl: (baseUrl) => `${baseUrl}/chat/completions`,
-      canonicalYouTubeUrl: (videoId) =>
-        `https://www.youtube.com/watch?v=${videoId}`,
     },
   };
   sandbox.globalThis = sandbox;
@@ -140,7 +141,54 @@ function loadBackgroundHelpers({
   return sandbox.__YTD_TRANSLATION_TESTING__;
 }
 
-test("non-YouTube tabs explicitly close before their panel is disabled", async () => {
+test("transcript requests route by site and only X can opt into speech transcription", async () => {
+  const calls = [];
+  const { handleFetchTranscript } = loadBackgroundHelpers({
+    settings: { supadataApiKey: "test-key" },
+    fetchImpl: async (url) => {
+      calls.push(new URL(url));
+      return new Response(JSON.stringify({ content: [{ text: "Speech", offset: 9200 }], lang: "en" }));
+    },
+  });
+  assert.equal((await handleFetchTranscript("x:1234567890")).success, false);
+  assert.equal(calls.length, 0);
+  const [x, repeated] = await Promise.all([
+    handleFetchTranscript("x:1234567890", { allowXTranscription: true }),
+    handleFetchTranscript("x:1234567890", { allowXTranscription: true }),
+  ]);
+  assert.equal(x.transcriptTextTimestamped, "[0:09] Speech");
+  assert.equal(repeated.transcriptTextTimestamped, x.transcriptTextTimestamped);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].searchParams.get("mode"), "auto");
+  assert.equal(calls[0].searchParams.get("url"), "https://x.com/i/status/1234567890");
+  await handleFetchTranscript("video123");
+  assert.equal(calls[1].searchParams.get("mode"), "native");
+});
+
+test("Bilibili uses the requested part and falls back when its first subtitle track is empty", async () => {
+  const preferred = { lang: "zh-CN", url: "first" };
+  const alternate = { lang: "ai-en", url: "second" };
+  const { handleFetchTranscript } = loadBackgroundHelpers({
+    settings: {},
+    fetchImpl: () => { throw new Error("Bilibili must not call Supadata"); },
+    biliApi: {
+      fetchVideoInfo: async (bvid, { page }) => {
+        assert.equal(bvid, "BV1DXKS6rEYq");
+        assert.equal(page, 2);
+        return { pageCount: 2, title: "Part Two" };
+      },
+      fetchSubtitleTracks: async () => ({ tracks: [preferred, alternate] }),
+      pickSubtitleTrack: () => preferred,
+      fetchSubtitleTrackContent: async (url) => url === "first" ? [] : [{ text: "Part two", start: 62.5 }],
+    },
+  });
+  const result = await handleFetchTranscript("bili:BV1DXKS6rEYq:2");
+  assert.equal(result.transcriptTextTimestamped, "[1:02] Part two");
+  assert.equal(result.language, "en");
+  assert.equal(result.videoInfo.title, "Part Two");
+});
+
+test("unrelated tabs explicitly close before their panel is disabled", async () => {
   const calls = [];
   const background = loadBackgroundHelpers({
     sidePanel: {
@@ -237,9 +285,9 @@ const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 test("the header exposes one universal language control for all result tabs", () => {
   const html = read("sidepanel.html");
   const js = read("sidepanel.js");
-  assert.match(html, /id="transcriptModeControl"[\s\S]*aria-label="Content language"/);
+  assert.match(html, /id="transcriptModeControl"[\s\S]*aria-label="内容语言"/);
   assert.match(html, /id="transcriptModeControl"[\s\S]*id="tabsNav"/);
-  assert.match(html, /data-transcript-mode="original"[\s\S]*?>Original</);
+  assert.match(html, /data-transcript-mode="original"[\s\S]*?>原文</);
   assert.match(html, /data-transcript-mode="zh"[\s\S]*?>\u4e2d\u6587</);
   assert.match(html, /data-transcript-mode="bilingual"[\s\S]*?>\u53cc\u8bed</);
   assert.match(js, /handleDisplayLanguageModeChange\(button\.dataset\.transcriptMode\)/);
@@ -374,6 +422,22 @@ test("Chinese sentence and clause punctuation creates semantic guardrails", () =
   assert.equal(segments.length, 2);
   assert.equal(segments[0].text, "这是一个被字幕切开的完整句子。");
   assert.equal(segments[1].text, "这是第二个想法，也应该保持语义完整！");
+});
+
+test("Bilibili original keeps raw cue breaks and timestamps without changing translation groups", () => {
+  const { getOriginalTranscriptRows, groupTranscriptEntries, renderTranscriptSegmentContent } = loadSidepanelHelpers();
+  const entries = [
+    { start: 308.25, duration: 2, text: "先打开设置页" },
+    { start: 310.4, duration: 3, text: "然后填写 API Key" },
+    { start: 313.8, duration: 2, text: "点击保存。" },
+  ];
+  assert.deepEqual(getOriginalTranscriptRows(entries, "bili:BV1dnuq6dEak:1"), entries);
+  const defaultGroups = groupTranscriptEntries(entries);
+  const withBreaks = groupTranscriptEntries(entries, undefined, { preserveCueBreaks: true });
+  assert.equal(withBreaks[0].id, defaultGroups[0].id);
+  assert.equal(withBreaks[0].text, defaultGroups[0].text);
+  assert.equal(withBreaks[0].displayText, entries.map(({ text }) => text).join("\n"));
+  assert.match(renderTranscriptSegmentContent(withBreaks[0], "bilingual", "", ""), /先打开设置页\n然后填写 API Key\n点击保存。/);
 });
 
 test("structured translation batches align by stable ID and expose missing fallback", () => {

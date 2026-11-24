@@ -96,7 +96,7 @@ class FakeElement {
   }
 }
 
-function createHarness() {
+function createHarness(url = "https://www.youtube.com/watch?v=demo123") {
   const actionRows = [];
   const fallbackRows = [];
   const elements = [];
@@ -138,8 +138,9 @@ function createHarness() {
   const context = vm.createContext({
     console,
     document,
+    YTD_SETTINGS: require("../settings.js"),
     window: {
-      location: { pathname: "/watch" },
+      location: new URL(url),
       addEventListener(type, listener) {
         windowListeners[type] = listener;
       },
@@ -332,4 +333,26 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(oldGroup.children.length, 0);
   assert.equal(newRow.children.length, 1);
   assert.equal(newGroup.children.length, 1);
+});
+
+test("X finds the opened post by its timestamp link and controls its video, not a reply", () => {
+  const postUrl = "https://x.com/SpaceX/status/1481651037291225113";
+  const { context } = createHarness(postUrl);
+  const querySelectorAll = context.document.querySelectorAll;
+  const actions = new FakeElement();
+  const video = { currentTime: 0, duration: 17, paused: false };
+  const getArticle = (href, player) => ({
+    querySelectorAll: () => [{ href, closest: () => ({ role: "link" }) }],
+    querySelector: (selector) => selector === "video" ? player : actions,
+  });
+  const reply = getArticle("https://x.com/example/status/2222222222", { currentTime: 0 });
+  context.document.querySelectorAll = (selector) => selector.includes("article")
+    ? [reply, getArticle(postUrl, video)]
+    : querySelectorAll.call(context.document, selector);
+
+  assert.equal(context.injectDigestButton(), true);
+  assert.equal(actions.firstChild.id, "ytd-digest-button");
+  assert.equal(context.seekToTimestamp(14), true);
+  assert.equal(video.currentTime, 14);
+  assert.equal(reply.querySelector("video").currentTime, 0);
 });

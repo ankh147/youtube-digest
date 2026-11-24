@@ -19,7 +19,7 @@ test("all timestamped transcript row clicks use the selection-aware seek helper"
   );
 
   const guardedRowHandlers = source.match(
-    /div\.addEventListener\("click", \(event\) =>\s+seekFromTranscriptEntryClick\(event, group\.start\),\s+\);/g,
+    /div\.addEventListener\("click", \(event\) =>\s+seekFromTranscriptEntryClick\(event, row\.start\),\s+\);/g,
   );
   assert.equal(
     guardedRowHandlers?.length,
@@ -33,14 +33,14 @@ test("all timestamped transcript row clicks use the selection-aware seek helper"
   );
   assert.doesNotMatch(
     source,
-    /div\.addEventListener\("click", \(\) => seekTo\(group\.start\)\);/,
+    /div\.addEventListener\("click", \(\) => seekTo\(row\.start\)\);/,
   );
 });
 
 test("the selection toolbar preserves selection and contains pointer events", () => {
   assert.match(
     source,
-    /class="explain-btn"[\s\S]*?>Explain<[\s\S]*class="selection-note-btn"[\s\S]*?>Note</,
+    /class="explain-btn"[\s\S]*?>讲解<[\s\S]*class="selection-note-btn"[\s\S]*?>笔记</,
   );
   assert.match(
     source,
@@ -94,7 +94,7 @@ test("the transcript view restores without resuming automatic scrolling", () => 
   );
   assert.match(
     source,
-    /pendingTranscriptViewState = await loadTranscriptViewState\(videoId\)/,
+    /loadTranscriptViewState\(videoId\)[\s\S]*pendingTranscriptViewState = viewState/,
   );
   assert.match(
     source,
@@ -114,25 +114,25 @@ test("the transcript view restores without resuming automatic scrolling", () => 
   );
 });
 
-test("the first non-YouTube navigation is checked again after commit", () => {
+test("navigation outside supported sites is checked again after commit", () => {
   assert.match(
     source,
     /function getNavigationUrl\(changeInfo, tab\)[\s\S]*changeInfo\.status !== "loading"[\s\S]*changeInfo\.status !== "complete"[\s\S]*tab\.pendingUrl \|\| tab\.url/,
   );
   assert.match(
     source,
-    /chrome\.tabs\.onUpdated\.addListener\(\(tabId, changeInfo, tab\)[\s\S]*getNavigationUrl\(changeInfo, tab\)[\s\S]*handleFrontTabUrl\(url\)/,
+    /chrome\.tabs\.onUpdated\.addListener\(\(tabId, changeInfo, tab\)[\s\S]*getNavigationUrl\(changeInfo, tab\)[\s\S]*handleFrontTabUrl\(url, tabId\)/,
   );
 });
 
-test("the panel never borrows a background YouTube tab", () => {
+test("the panel only queries the active tab in its own window", () => {
   assert.match(
     source,
-    /const tabs = await chrome\.tabs\.query\(\{\s*active: true,\s*lastFocusedWindow: true,\s*\}\);/,
+    /\{ active: true, currentWindow: true \}[\s\S]*\{ active: true, windowId: panelWindowId \}[\s\S]*const \[tab\] = await chrome\.tabs\.query\(query\)/,
   );
   assert.match(
     source,
-    /if \(!tab\.url\.startsWith\("https:\/\/www\.youtube\.com"\)\) \{\s*handleFrontTabUrl\(tab\.url\);\s*return;/,
+    /if \(!YTD_SETTINGS\.supportsPanel\(tab\.url\)\) \{\s*handleFrontTabUrl\(tab\.url, tab\.id\);\s*return;/,
   );
   assert.doesNotMatch(
     source,
