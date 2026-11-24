@@ -28,6 +28,9 @@ public_allowlist=(
   "manifest.json"
   "background.js"
   "settings.js"
+  "lib/wbi.js"
+  "lib/bili-api.js"
+  "lib/bilibili-digest-LICENSE"
   "content.js"
   "sidepanel.html"
   "sidepanel.css"
@@ -227,7 +230,8 @@ for file in "${javascript_files[@]}"; do
 done
 
 if compgen -G "tests/*.test.js" >/dev/null; then
-  node --test tests/*.test.js
+  # The packaging command consumes stdout as a list of file paths.
+  node --test tests/*.test.js >&2
 fi
 
 if ((${#javascript_files[@]} > 0)); then
