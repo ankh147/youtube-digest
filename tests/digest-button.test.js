@@ -166,7 +166,9 @@ function createHarness(url = "https://www.youtube.com/watch?v=demo123") {
         this.callback = callback;
         observers.push(this);
       }
-      observe() {}
+      observe(_target, options) {
+        this.options = options;
+      }
     },
     setTimeout(callback) {
       const id = nextTimerId++;
@@ -337,6 +339,91 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(oldGroup.children.length, 0);
   assert.equal(newRow.children.length, 1);
   assert.equal(newGroup.children.length, 1);
+});
+
+test("YouTube waits for the watch page to match the current video before inserting buttons", () => {
+  const { context, actionRows, documentListeners, observers, flushTimers } = createHarness();
+  const { row, buttonGroup } = createActionRow({ width: 400, height: 36 });
+  actionRows.push(row);
+  const player = new FakeElement();
+  let renderedVideoId = "previous123";
+  const watch = { getAttribute: (name) => name === "video-id" ? renderedVideoId : null };
+  context.document.querySelector = (selector) => {
+    if (selector === "ytd-watch-flexy") return watch;
+    if (selector.includes("#movie_player")) return player;
+    return null;
+  };
+
+  documentListeners.DOMContentLoaded();
+
+  assert.equal(buttonGroup.firstChild, null);
+  assert.equal(player.firstChild, null);
+  assert.ok(observers[0].options.attributeFilter?.includes("video-id"));
+
+  renderedVideoId = "demo123";
+  observers[0].callback([{ type: "attributes", attributeName: "video-id" }]);
+  flushTimers();
+
+  assert.equal(buttonGroup.firstChild.id, "ytd-digest-button");
+  assert.equal(player.firstChild.id, "ytd-note-button");
+});
+
+test("Bilibili waits for hydration before inserting buttons into the toolbar and player", () => {
+  const { context, documentListeners, observers, flushTimers } = createHarness(
+    "https://www.bilibili.com/video/BV1bcx96aEkX/",
+  );
+  const toolbar = new FakeElement();
+  const player = new FakeElement();
+  const serverRenderedRoot = new FakeElement();
+  let awaitingHydration = true;
+  context.document.querySelector = (selector) => {
+    if (selector === "#app[data-server-rendered]") return awaitingHydration ? serverRenderedRoot : null;
+    if (selector.startsWith(".video-toolbar-left")) return toolbar;
+    if (selector === "#bilibili-player .bpx-player-primary-area") return player;
+    return null;
+  };
+
+  documentListeners.DOMContentLoaded();
+
+  assert.equal(toolbar.children.length, 0);
+  assert.equal(player.children.length, 0);
+  assert.equal(player.style.position, undefined);
+  assert.ok(observers[0].options.attributeFilter?.includes("data-server-rendered"));
+
+  awaitingHydration = false;
+  observers[0].callback([{ type: "attributes", attributeName: "data-server-rendered" }]);
+  flushTimers();
+
+  assert.equal(toolbar.firstChild.id, "ytd-digest-button");
+  assert.equal(player.firstChild.id, "ytd-note-button");
+});
+
+test("X waits for the native action group instead of inserting into the post", () => {
+  const postUrl = "https://x.com/SpaceX/status/1481651037291225113";
+  const { context, documentListeners, observers, flushTimers } = createHarness(postUrl);
+  const querySelectorAll = context.document.querySelectorAll;
+  const article = new FakeElement();
+  const actions = new FakeElement();
+  const player = new FakeElement();
+  article.querySelectorAll = () => [{ href: postUrl }];
+  article.querySelector = (selector) => {
+    if (selector === '[role="group"]') return article.children.includes(actions) ? actions : null;
+    if (selector.includes('[data-testid="videoPlayer"]')) return player;
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => selector === "main article"
+    ? [article]
+    : querySelectorAll.call(context.document, selector);
+
+  documentListeners.DOMContentLoaded();
+  assert.equal(article.firstChild, null);
+
+  article.appendChild(actions);
+  observers[0].callback([{ type: "childList" }]);
+  flushTimers();
+
+  assert.deepEqual(article.children, [actions]);
+  assert.equal(actions.firstChild.id, "ytd-digest-button");
 });
 
 test("X finds the opened post by its timestamp link and controls its video, not a reply", async () => {

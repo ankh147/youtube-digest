@@ -19,7 +19,19 @@ let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
 let digestButtonResizeListenerAdded = false;
 
+function isVideoPagePending(source) {
+  if (source?.platform === "bilibili") {
+    return document.querySelector("#app[data-server-rendered]") !== null;
+  }
+  if (source?.platform === "youtube") {
+    const watchPage = document.querySelector("ytd-watch-flexy");
+    return watchPage !== null && watchPage.getAttribute("video-id") !== source.id;
+  }
+  return false;
+}
+
 function playerContainerFor(source) {
+  if (isVideoPagePending(source)) return null;
   if (source?.platform === "youtube") {
     return document.querySelector("#movie_player.html5-video-player, #movie_player, .html5-video-player");
   }
@@ -38,7 +50,7 @@ function actionHostFor(source) {
   }
   const article = findPostArticle(source);
   if (!article?.querySelector("video") && !findPostPlayer(article)) return null;
-  return article?.querySelector('[role="group"]') || article;
+  return article.querySelector('[role="group"]');
 }
 
 let lastTimestampTarget;
@@ -61,10 +73,6 @@ function openLinkedPostTimestamp(source) {
 // INITIALIZATION
 // ============================================================
 
-/**
- * When the page loads, inject our Digest button and Note button.
- * We wait a bit for YouTube's UI to fully render.
- */
 function init() {
   // Register the global "n" keyboard shortcut once
   if (!ytdNoteKeyboardListenerAdded) {
@@ -72,12 +80,9 @@ function init() {
     ytdNoteKeyboardListenerAdded = true;
   }
 
-  // Try to inject the buttons immediately
   injectDigestButton();
   tryInjectNoteButton();
 
-  // Also set up an observer to handle YouTube's dynamic content loading
-  // (YouTube is an SPA, so elements appear/disappear as you navigate)
   setupButtonObserver();
   setupDigestButtonResizeListener();
   window.addEventListener("hashchange", () => openLinkedPostTimestamp(currentSource()));
@@ -89,7 +94,8 @@ function init() {
  * after navigation, so a single immediate attempt can miss it.
  */
 function tryInjectNoteButton() {
-  if (!currentSource()) return;
+  const source = currentSource();
+  if (!source || isVideoPagePending(source)) return;
 
   // Clear any existing retry so we don't stack timers
   if (ytdNoteButtonRetryTimer) {
@@ -283,17 +289,14 @@ function createDigestButton() {
   return digestButton;
 }
 
-/**
- * Reconciles the Digest button with YouTube's currently visible action row.
- * This is intentionally idempotent because YouTube rebuilds its watch page
- * during navigation and at responsive breakpoints.
- */
 function injectDigestButton() {
+  const source = currentSource();
+  if (isVideoPagePending(source)) return false;
+
   const existingButtons = Array.from(
     document.querySelectorAll("#ytd-digest-button"),
   );
 
-  const source = currentSource();
   if (!source) {
     existingButtons.forEach((button) => button.remove());
     ytdDigestButton = null;
@@ -353,10 +356,6 @@ function setupDigestButtonResizeListener() {
   digestButtonResizeListenerAdded = true;
 }
 
-/**
- * Sets up a MutationObserver to watch for YouTube's dynamic content changes.
- * When the action buttons container appears (after navigation), we inject our button.
- */
 function setupButtonObserver() {
   if (digestButtonObserver) return;
 
@@ -369,10 +368,10 @@ function setupButtonObserver() {
     }
   });
 
-  // Watch the entire body for changes (YouTube rebuilds large chunks of the DOM)
   digestButtonObserver.observe(document.body, {
     childList: true,
     subtree: true,
+    attributeFilter: ["data-server-rendered", "video-id"],
   });
 }
 
